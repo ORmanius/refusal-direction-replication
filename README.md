@@ -1,6 +1,6 @@
 # Refusal direction replication
 
-**Status:** Qwen2.5-1.5B-Instruct local run complete (2026-11-04, results committed); Gemma-2-2b-it Colab run pending.
+**Status:** Both runs complete and committed (2026-11-04): Qwen2.5-1.5B-Instruct locally, Gemma-2-2b-it on a Colab T4. The core result replicates on both models.
 
 A small, reproducible replication of the core result of
 *Refusal in Language Models Is Mediated by a Single Direction* (Arditi et al., 2024,
@@ -82,8 +82,8 @@ Results land in `results/qwen2.5-1.5b-instruct/`.
 Open `notebooks/02_gemma_colab.ipynb` in Colab with a T4 runtime. It clones this repo,
 installs the package, loads Gemma with your Hugging Face token (Gemma is gated), runs the same
 pipeline and offers a zip of `results/gemma-2-2b-it/` to download and commit. The notebook's
-first cell lists the exact steps. The Colab cells were tested on CPU with `pythia-70m` by setting
-`REFUSAL_SMOKE=1`; the Gemma run itself has to happen on the T4.
+first cell lists the exact steps. The committed Gemma results came from exactly this notebook on a
+free Colab T4 (23 minutes). Setting `REFUSAL_SMOKE=1` runs the same cells on CPU with `pythia-70m`.
 
 ### Tests
 
@@ -133,10 +133,38 @@ is the earliest layer that passes both tests at 100 %. Full numbers: the CSV.
 
 The whole run (activations, 28-layer sweep, final completions) took 5 minutes on the RTX 2060.
 
-### Gemma-2-2b-it (Colab T4)
+### Gemma-2-2b-it (Colab, Tesla T4, float32)
 
-Pending. `notebooks/02_gemma_colab.ipynb` is written and was exercised on CPU with a stand-in
-model; the T4 run has not been done yet.
+Source: `results/gemma-2-2b-it/refusal_by_layer.csv` and `summary.json` (run of 2026-11-04,
+same seed, prompt sets, decoding and metric as above; batch size 8, eager attention, float32
+because the T4 has no native bfloat16). Direction read at the **last token of the chat-templated
+prompt** after **layer 11** of 26.
+
+| Validation set | No intervention | Direction ablated (all layers) | Direction added (layer 11) |
+|---|---|---|---|
+| Harmful (AdvBench, n=32) | 32/32 refused (100 %) | 0/32 refused (0 %) | - |
+| Harmless (Alpaca, n=32) | 0/32 refused (0 %) | - | 32/32 refused (100 %) |
+
+![Refusal rate by layer, Gemma-2-2b-it](results/gemma-2-2b-it/refusal_by_layer.png)
+
+What the sweep shows: directions from layers 0-5 do nothing; layer 6 ablates partially (5/32
+still refuse) and layers 7-16 and 18-20 ablate completely. Addition induces refusal from layer 9
+(27/32) and is complete for layers 11-20. Both effects fall apart from layer 21 onward (addition
+drops to 4/32 at layer 22, ablation leaves 6/32 refusing at layer 21), earlier in relative terms
+than for Qwen. The chosen layer 11 is the earliest that passes both tests at 100 %. Full numbers:
+the CSV.
+
+The run took 23 minutes on the T4. Note that Colab's preinstalled PyTorch (2.11.0, CUDA 13.0) was
+used rather than the pinned 2.14.1; `transformers` and `nnsight` were installed at the pinned
+versions. `summary.json` records the versions actually used.
+
+### Across the two models
+
+The same pipeline, prompt sets and selection rule give a direction in the middle third of the
+network for both models (layer 15/28 for Qwen, 11/26 for Gemma) that flips the substring-match
+refusal rate from 100 % to 0 % on harmful prompts when ablated and from 0 % to 100 % on harmless
+prompts when added, with coherent completions in both directions (see the committed
+`completions_*.jsonl` files). That is the paper's core claim at the scale this repo can test.
 
 ## Limitations
 

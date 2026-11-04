@@ -1,0 +1,38 @@
+{
+ "package_version": "0.1.0",
+ "model": "google/gemma-2-2b-it",
+ "dtype": "float32",
+ "n_layers": 26,
+ "d_model": 2304,
+ "position": -1,
+ "position_note": "last token of the chat-templated prompt (left padding)",
+ "chosen_layer": 11,
+ "baseline_refusal_rate_harmful": 1.0,
+ "baseline_refusal_rate_harmless": 0.0,
+ "chosen_ablation_refusal_rate_harmful": 0.0,
+ "chosen_addition_refusal_rate_harmless": 1.0,
+ "config": {
+  "model_name": "google/gemma-2-2b-it",
+  "out_dir": "results/gemma-2-2b-it",
+  "dtype": "float32",
+  "n_train": 128,
+  "n_val": 32,
+  "seed": 0,
+  "position": -1,
+  "max_new_tokens": 64,
+  "batch_size": 8,
+  "layers": null,
+  "attn_implementation": "eager",
+  "device_map": "auto",
+  "splits_path": "data/splits_seed0.json"
+ },
+ "versions": {
+  "python": "3.13.16",
+  "torch": "2.11.0+cu130",
+  "transformers": "5.22.1",
+  "nnsight": "0.8.2"
+ },
+ "device": "cuda:0",
+ "gpu": "Tesla T4",
+ "runtime_seconds": 1360.5
+}
