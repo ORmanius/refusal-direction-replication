@@ -44,6 +44,27 @@ class ExperimentConfig:
     hf_token: str | None = None
 
 
+def _rel(path: Path) -> str:
+    """Path relative to the repo root (or to the current directory), never an absolute local path."""
+    path = Path(path)
+    for base in (REPO_ROOT, Path.cwd()):
+        try:
+            return path.resolve().relative_to(base.resolve()).as_posix()
+        except ValueError:
+            continue
+    return path.name
+
+
+def config_summary(cfg: "ExperimentConfig") -> dict:
+    """The run configuration as plain values: paths made relative, the HF token left out."""
+    out = {}
+    for k, v in asdict(cfg).items():
+        if k == "hf_token":
+            continue
+        out[k] = _rel(v) if isinstance(v, Path) else v
+    return out
+
+
 def set_seed(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
@@ -157,7 +178,7 @@ def run_experiment(cfg: ExperimentConfig, bundle: ModelBundle | None = None) -> 
         "baseline_refusal_rate_harmless": baseline_harmless,
         "chosen_ablation_refusal_rate_harmful": refusal_rate(abl),
         "chosen_addition_refusal_rate_harmless": refusal_rate(add),
-        "config": {k: str(v) if isinstance(v, Path) else v for k, v in asdict(cfg).items() if k != "hf_token"},
+        "config": config_summary(cfg),
         "versions": {
             "python": platform.python_version(),
             "torch": torch.__version__,

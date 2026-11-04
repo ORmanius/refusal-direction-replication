@@ -1,6 +1,6 @@
 # Refusal direction replication
 
-**Status:** repo scaffolded; Qwen2.5-1.5B local run pending; Gemma-2-2b-it Colab run pending.
+**Status:** Qwen2.5-1.5B-Instruct local run complete (2026-11-04, results committed); Gemma-2-2b-it Colab run pending.
 
 A small, reproducible replication of the core result of
 *Refusal in Language Models Is Mediated by a Single Direction* (Arditi et al., 2024,
@@ -32,7 +32,7 @@ that one result; see *Limitations* for what is left out.
 | Refusal metric | substring match (paper's phrase list) | substring match + LLM judge |
 | Layer selection | best combined val score, excluding last 20 % of layers | val score with KL and refusal-score constraints |
 
-Results: pending.
+Results are in the *Results* section below; every number there comes from a CSV in `results/`.
 
 ## Library choice: NNsight
 
@@ -107,7 +107,36 @@ and without interventions. GitHub Actions runs it on every push (CPU PyTorch).
 
 ## Results
 
-Pending.
+### Qwen2.5-1.5B-Instruct (local, RTX 2060, fp16)
+
+Source: `results/qwen2.5-1.5b-instruct/refusal_by_layer.csv` and `summary.json`
+(run of 2026-11-04, seed 0, 32 held-out prompts per class, greedy decoding, 64 new tokens,
+substring-match refusal metric). Direction read at the **last token of the chat-templated
+prompt** after **layer 15** of 28 (the layer's output, resid_post), chosen as the best
+combined validation score among the first 80 % of layers.
+
+| Validation set | No intervention | Direction ablated (all layers) | Direction added (layer 15) |
+|---|---|---|---|
+| Harmful (AdvBench, n=32) | 32/32 refused (100 %) | 0/32 refused (0 %) | - |
+| Harmless (Alpaca, n=32) | 0/32 refused (0 %) | - | 32/32 refused (100 %) |
+
+Per-layer sweep (each layer's own difference-in-means direction, ablated everywhere for the
+harmful set and added at that layer for the harmless set):
+
+![Refusal rate by layer, Qwen2.5-1.5B-Instruct](results/qwen2.5-1.5b-instruct/refusal_by_layer.png)
+
+What the sweep shows: directions from layers 0-9 do nothing; ablation starts to work at layers
+10-12 and is complete (0 % refusal) for layers 13-15 and 19-26; addition induces refusal from
+layer 13 onward. Layers 16-18 ablate less cleanly (16-25 % residual refusal) and the last layer
+is poor on both tests, as the paper's exclusion of late layers anticipates. The chosen layer 15
+is the earliest layer that passes both tests at 100 %. Full numbers: the CSV.
+
+The whole run (activations, 28-layer sweep, final completions) took 5 minutes on the RTX 2060.
+
+### Gemma-2-2b-it (Colab T4)
+
+Pending. `notebooks/02_gemma_colab.ipynb` is written and was exercised on CPU with a stand-in
+model; the T4 run has not been done yet.
 
 ## Limitations
 
