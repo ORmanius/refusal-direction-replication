@@ -1,0 +1,5 @@
+set,n,layer,intervention,baseline_refusal_rate,intervention_refusal_rate
+harmbench_standard,64,15,ablation,0.953125,0.0
+jbb_harmful,64,15,ablation,1.0,0.0
+jbb_benign,64,15,ablation,0.515625,0.0
+jbb_benign,64,15,addition,0.515625,1.0

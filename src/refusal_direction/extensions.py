@@ -1,0 +1,436 @@
+"""Extensions beyond the core replication. Each one either tightens the evidence or shows
+the mechanism; all reuse the direction fitted by `pipeline.run_experiment`.
+
+1. Direction similarity: cosine similarity between the per-layer difference-in-means
+   directions. The paper's "single direction" claim predicts a block of near-identical
+   directions across the middle layers.
+2. Capability check (the paper's KL criterion plus a loss on reference answers): for each
+   layer's direction, ablate it everywhere and measure (a) the KL divergence from the
+   baseline next-token distribution at the last prompt token on harmless prompts and
+   (b) the mean negative log-likelihood of Alpaca reference answers. A direction that
+   merely damages the model shows up here.
+3. Token-by-token dynamics: the projection of the residual stream onto the chosen
+   direction at every token of prompt + completion, under each intervention.
+4. Transfer: the direction fitted on AdvBench applied to HarmBench, JailbreakBench harmful
+   (minus its AdvBench-sourced rows) and JailbreakBench benign prompts.
+"""
+
+from __future__ import annotations
+
+import json
+import random
+import time
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import torch
+import torch.nn.functional as F
+
+from .data import get_transfer_sets, load_harmless_pairs
+from .intervention import _batches, _walk, generate
+from .model import ModelBundle, format_prompts, tokenize, value
+from .pipeline import REPO_ROOT, ExperimentConfig, _write_jsonl, set_seed
+from .scoring import is_refusal, refusal_rate
+
+N_PROMPT_TOKENS_SHOWN = 8  # prompt tokens kept (before the first generated token) in the dynamics plots
+
+
+def load_run(out_dir: Path) -> dict:
+    """Directions and chosen layer written by `run_experiment` into `out_dir`."""
+    d = torch.load(out_dir / "directions.pt")
+    with open(out_dir / "summary.json", encoding="utf-8") as f:
+        summary = json.load(f)
+    return {"r": d["r"], "r_hat": d["r_hat"], "chosen": int(summary["chosen_layer"]), "summary": summary}
+
+
+# 1. Direction similarity ---------------------------------------------------------------
+
+
+def direction_cosine(r_hat: torch.Tensor) -> np.ndarray:
+    """[n_layers, n_layers] cosine similarity between unit directions."""
+    return (r_hat.float() @ r_hat.float().T).cpu().numpy()
+
+
+# 2. Capability check -------------------------------------------------------------------
+
+
+@torch.no_grad()
+def last_token_logprobs(
+    bundle: ModelBundle, prompts: list[str], batch_size: int = 16, ablate_dir: torch.Tensor | None = None
+) -> torch.Tensor:
+    """Log-probabilities of the next token at the last prompt position, [n, vocab] float32 CPU."""
+    out = []
+    for batch in _batches(prompts, batch_size):
+        enc = tokenize(bundle, batch).to(bundle.device)
+        with bundle.lm.trace(enc):
+            _walk(bundle, ablate_dir=ablate_dir)
+            lp = torch.log_softmax(bundle.lm.output.logits[:, -1, :].float(), dim=-1).cpu().save()
+        out.append(value(lp))
+    return torch.cat(out, dim=0)
+
+
+def kl_divergence(p_logprobs: torch.Tensor, q_logprobs: torch.Tensor) -> torch.Tensor:
+    """KL(p || q) per row, in nats."""
+    return (p_logprobs.exp() * (p_logprobs - q_logprobs)).sum(-1)
+
+
+def _reference_texts(bundle: ModelBundle, pairs: list[tuple[str, str]]) -> tuple[list[str], list[int]]:
+    """Chat-formatted (instruction + reference answer) texts and the number of answer tokens in each."""
+    tok = bundle.tokenizer
+    if bundle.chat:
+        prompts = format_prompts(bundle, [i for i, _ in pairs])
+        full = [
+            tok.apply_chat_template(
+                [{"role": "user", "content": i}, {"role": "assistant", "content": o}], tokenize=False
+            )
+            for i, o in pairs
+        ]
+    else:
+        prompts = [i + "\n" for i, _ in pairs]
+        full = [i + "\n" + o for i, o in pairs]
+    add = not bundle.chat
+    n_answer = [
+        len(tok(f, add_special_tokens=add)["input_ids"]) - len(tok(p, add_special_tokens=add)["input_ids"])
+        for f, p in zip(full, prompts)
+    ]
+    return full, n_answer
+
+
+@torch.no_grad()
+def reference_nll(
+    bundle: ModelBundle,
+    pairs: list[tuple[str, str]],
+    batch_size: int = 4,
+    ablate_dir: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Mean negative log-likelihood per answer token of each reference answer, [n] float32."""
+    full, n_answer = _reference_texts(bundle, pairs)
+    out = []
+    for i in range(0, len(full), batch_size):
+        batch, n_ans = full[i : i + batch_size], n_answer[i : i + batch_size]
+        enc = tokenize(bundle, batch).to(bundle.device)
+        ids = enc["input_ids"]
+        with bundle.lm.trace(enc):
+            _walk(bundle, ablate_dir=ablate_dir)
+            logits = bundle.lm.output.logits
+            nll = F.cross_entropy(
+                logits[:, :-1, :].float().transpose(1, 2), ids[:, 1:], reduction="none"
+            ).cpu().save()
+        nll = value(nll)
+        # Left padding puts the answer tokens at the end of every row.
+        out.extend(float(nll[j, -n:].mean()) for j, n in enumerate(n_ans))
+    return torch.tensor(out)
+
+
+def capability_by_layer(
+    bundle: ModelBundle,
+    harmless_prompts: list[str],
+    pairs: list[tuple[str, str]],
+    r_hat: torch.Tensor,
+    layers: list[int],
+    batch_size: int = 16,
+    nll_batch_size: int = 4,
+) -> pd.DataFrame:
+    """KL to baseline and reference-answer NLL when each layer's direction is ablated everywhere.
+
+    Row `layer == -1` is the baseline (no ablation)."""
+    base_lp = last_token_logprobs(bundle, harmless_prompts, batch_size)
+    base_nll = reference_nll(bundle, pairs, nll_batch_size)
+    rows = [{"layer": -1, "kl_mean": 0.0, "kl_max": 0.0, "reference_nll": float(base_nll.mean())}]
+    for layer in layers:
+        lp = last_token_logprobs(bundle, harmless_prompts, batch_size, ablate_dir=r_hat[layer])
+        kl = kl_divergence(base_lp, lp)
+        nll = reference_nll(bundle, pairs, nll_batch_size, ablate_dir=r_hat[layer])
+        rows.append(
+            {"layer": layer, "kl_mean": float(kl.mean()), "kl_max": float(kl.max()),
+             "reference_nll": float(nll.mean())}
+        )
+        print(f"layer {layer:3d}: KL {rows[-1]['kl_mean']:.4f}  reference NLL {rows[-1]['reference_nll']:.4f}",
+              flush=True)
+    return pd.DataFrame(rows)
+
+
+# 3. Token-by-token dynamics ------------------------------------------------------------
+
+
+@torch.no_grad()
+def token_projections(
+    bundle: ModelBundle,
+    texts: list[str],
+    direction: torch.Tensor,
+    batch_size: int = 8,
+    ablate_dir: torch.Tensor | None = None,
+    add_vec: torch.Tensor | None = None,
+    add_layer: int | None = None,
+) -> list[np.ndarray]:
+    """Projection of every layer's residual stream onto `direction` at every token.
+
+    Returns one [n_layers, n_tokens] array per text (padding removed). The intervention,
+    if any, is applied during the forward pass, so a teacher-forced pass over prompt +
+    greedy completion reproduces the activations seen during generation."""
+    d = direction.to(bundle.device, bundle.dtype)
+    out: list[np.ndarray] = []
+    for batch in _batches(texts, batch_size):
+        enc = tokenize(bundle, batch).to(bundle.device)
+        with bundle.lm.trace(enc):
+            cols = _walk(bundle, ablate_dir=ablate_dir, add_vec=add_vec, add_layer=add_layer, position=slice(None))
+            proj = (torch.stack(cols, dim=1) * d).sum(-1).float().cpu().save()  # [B, L, T]
+        proj = value(proj).numpy()
+        mask = enc["attention_mask"].cpu().numpy().astype(bool)
+        for j in range(proj.shape[0]):
+            out.append(proj[j][:, mask[j]])
+    return out
+
+
+def _token_strings(bundle: ModelBundle, text: str) -> list[str]:
+    ids = tokenize(bundle, [text])["input_ids"][0].tolist()
+    return [bundle.tokenizer.decode([i]) for i in ids]
+
+
+def _prompt_len(bundle: ModelBundle, prompt: str) -> int:
+    return int(tokenize(bundle, [prompt])["attention_mask"].sum())
+
+
+def _aligned_mean(projs: list[np.ndarray], prompt_lens: list[int], layer: int, max_new_tokens: int) -> pd.DataFrame:
+    """Mean projection at `layer` by token index relative to the first generated token."""
+    ks = range(-N_PROMPT_TOKENS_SHOWN, max_new_tokens)
+    rows = []
+    for k in ks:
+        vals = []
+        for p, n in zip(projs, prompt_lens):
+            t = n + k
+            if 0 <= t < p.shape[1]:
+                vals.append(p[layer, t])
+        if vals:
+            rows.append({"k": k, "mean": float(np.mean(vals)), "std": float(np.std(vals)), "n": len(vals)})
+    return pd.DataFrame(rows)
+
+
+def dynamics_study(
+    bundle: ModelBundle,
+    harmful: list[str],
+    harmless: list[str],
+    r: torch.Tensor,
+    r_hat: torch.Tensor,
+    chosen: int,
+    max_new_tokens: int = 64,
+    batch_size: int = 8,
+    example_index: int = 0,
+) -> dict:
+    """Projections onto the chosen direction, token by token, for four conditions.
+
+    harmful prompts: baseline and direction ablated; harmless prompts: baseline and direction
+    added at the chosen layer. Also returns the full layer x token map for one harmless example
+    (its tokens are safe to display)."""
+    d = r_hat[chosen]
+    conds = {
+        "harmful_baseline": (harmful, {}),
+        "harmful_ablated": (harmful, {"ablate_dir": d}),
+        "harmless_baseline": (harmless, {}),
+        "harmless_added": (harmless, {"add_vec": r[chosen], "add_layer": chosen}),
+    }
+    curves, projs_all, completions_all = {}, {}, {}
+    for name, (prompts, kw) in conds.items():
+        comps = generate(bundle, prompts, max_new_tokens, batch_size, **kw)
+        texts = [p + c for p, c in zip(prompts, comps)]
+        projs = token_projections(bundle, texts, d, batch_size, **kw)
+        lens = [_prompt_len(bundle, p) for p in prompts]
+        curves[name] = _aligned_mean(projs, lens, chosen, max_new_tokens)
+        projs_all[name], completions_all[name] = projs, comps
+        print(f"{name}: refusal rate {refusal_rate(comps):.3f}", flush=True)
+
+    i = example_index
+    example = {}
+    for name in ("harmless_baseline", "harmless_added"):
+        text = harmless[i] + completions_all[name][i]
+        example[name] = {
+            "tokens": _token_strings(bundle, text),
+            "prompt_len": _prompt_len(bundle, harmless[i]),
+            "proj": projs_all[name][i],  # [L, T]
+            "refusal": is_refusal(completions_all[name][i]),
+        }
+    return {"curves": curves, "example": example, "chosen": chosen, "max_new_tokens": max_new_tokens}
+
+
+# 4. Transfer ---------------------------------------------------------------------------
+
+
+def transfer_study(
+    bundle: ModelBundle,
+    sets: dict,
+    r: torch.Tensor,
+    r_hat: torch.Tensor,
+    chosen: int,
+    out_dir: Path,
+    max_new_tokens: int = 64,
+    batch_size: int = 16,
+    tag: str = "",
+) -> pd.DataFrame:
+    """Refusal rates on the transfer sets with the direction of layer `chosen` ablated (all
+    three sets) or added (benign set). Completions of the ablated model are written to files
+    that .gitignore keeps out of the repository; `tag` is appended to the file names."""
+    plan = [("harmbench_standard", "ablation"), ("jbb_harmful", "ablation"),
+            ("jbb_benign", "ablation"), ("jbb_benign", "addition")]
+    base_cache: dict[str, list[str]] = {}
+    rows = []
+    for name, kind in plan:
+        instr = sets[name]
+        prompts = format_prompts(bundle, instr)
+        if name not in base_cache:
+            base_cache[name] = generate(bundle, prompts, max_new_tokens, batch_size)
+            _write_jsonl(out_dir / f"completions_{name}_baseline.jsonl", instr, base_cache[name])
+        base = base_cache[name]
+        if kind == "addition":
+            inter = generate(bundle, prompts, max_new_tokens, batch_size, add_vec=r[chosen], add_layer=chosen)
+        else:
+            inter = generate(bundle, prompts, max_new_tokens, batch_size, ablate_dir=r_hat[chosen])
+        _write_jsonl(out_dir / f"completions_{name}_{kind}{tag}.jsonl", instr, inter)
+        rows.append(
+            {"set": name, "n": len(instr), "layer": chosen, "intervention": kind,
+             "baseline_refusal_rate": refusal_rate(base), "intervention_refusal_rate": refusal_rate(inter)}
+        )
+        print(f"{name}: baseline {rows[-1]['baseline_refusal_rate']:.3f} -> {kind} (layer {chosen}) "
+              f"{rows[-1]['intervention_refusal_rate']:.3f}", flush=True)
+    return pd.DataFrame(rows)
+
+
+# 5. Layer selection with the paper's KL constraint ---------------------------------------
+
+
+def select_layer_with_kl(
+    sweep: pd.DataFrame, cap: pd.DataFrame, n_layers: int, skip_last_frac: float = 0.2, kl_max: float = 0.1
+) -> dict:
+    """The paper filters candidate directions by KL divergence on harmless prompts (< 0.1 nats)
+    before picking the one that best removes refusal. Applied to this repo's sweep: among the
+    layers below the late-layer cutoff whose ablation KL is under `kl_max`, take the best
+    combined validation score (as `pipeline.choose_layer`), ties to the lowest KL. If no layer
+    passes the KL filter, the filter is dropped and `kl_filter_satisfied` is False."""
+    cutoff = int(round(n_layers * (1 - skip_last_frac)))
+    df = sweep.merge(cap[cap["layer"] >= 0], on="layer")
+    df = df[df["layer"] < cutoff].copy()
+    df["score"] = (1 - df["ablation_refusal_rate_harmful"]) + df["addition_refusal_rate_harmless"]
+    ok = df[df["kl_mean"] < kl_max]
+    satisfied = len(ok) > 0
+    cand = ok if satisfied else df
+    best = cand.sort_values(["score", "kl_mean", "layer"], ascending=[False, True, True]).iloc[0]
+    return {
+        "layer": int(best["layer"]),
+        "kl_mean": float(best["kl_mean"]),
+        "reference_nll": float(best["reference_nll"]),
+        "sweep_ablation_refusal_rate_harmful": float(best["ablation_refusal_rate_harmful"]),
+        "sweep_addition_refusal_rate_harmless": float(best["addition_refusal_rate_harmless"]),
+        "kl_max": kl_max,
+        "kl_filter_satisfied": bool(satisfied),
+    }
+
+
+# Driver --------------------------------------------------------------------------------
+
+
+def _reference_pairs(splits: dict, n: int, seed: int) -> list[tuple[str, str]]:
+    """Alpaca (instruction, output) pairs disjoint from the train/val instructions, fixed seed."""
+    used = set(splits["harmless_train"]) | set(splits["harmless_val"])
+    pool = [p for p in load_harmless_pairs() if p[0] not in used]
+    rng = random.Random(seed)
+    return [pool[i] for i in sorted(rng.sample(range(len(pool)), n))]
+
+
+def run_extensions(
+    cfg: ExperimentConfig,
+    bundle: ModelBundle,
+    r: torch.Tensor,
+    r_hat: torch.Tensor,
+    chosen: int,
+    splits: dict,
+    transfer_path: Path = REPO_ROOT / "data" / "transfer_seed0.json",
+    n_transfer: int = 64,
+    n_reference: int = 64,
+    layers: list[int] | None = None,
+) -> dict:
+    from .plot import plot_capability_by_layer, plot_direction_similarity, plot_dynamics
+
+    t0 = time.time()
+    set_seed(cfg.seed)
+    out = cfg.out_dir / "extensions"
+    out.mkdir(parents=True, exist_ok=True)
+    short = cfg.model_name.split("/")[-1]
+    layers = layers if layers is not None else list(range(bundle.n_layers))
+    fmt = lambda xs: format_prompts(bundle, xs)  # noqa: E731
+
+    # 1. Direction similarity.
+    cos = direction_cosine(r_hat)
+    pd.DataFrame(cos).to_csv(out / "direction_cosine.csv", index_label="layer")
+    plot_direction_similarity(cos, chosen, f"{short}: cosine similarity between per-layer directions",
+                              out / "direction_similarity.png")
+
+    # 2. Capability check.
+    pairs = _reference_pairs(splits, n_reference, cfg.seed)
+    with open(out / "reference_pairs.json", "w", encoding="utf-8") as f:
+        json.dump([{"instruction": i, "output": o} for i, o in pairs], f, indent=1, ensure_ascii=False)
+    cap = capability_by_layer(bundle, fmt(splits["harmless_val"]), pairs, r_hat, layers, cfg.batch_size)
+    cap.to_csv(out / "capability_by_layer.csv", index=False)
+    plot_capability_by_layer(cap, chosen, f"{short}: cost of ablating each layer's direction",
+                             out / "capability_by_layer.png")
+
+    # 3. Token-by-token dynamics.
+    dyn = dynamics_study(bundle, fmt(splits["harmful_val"]), fmt(splits["harmless_val"]), r, r_hat, chosen,
+                         cfg.max_new_tokens, min(cfg.batch_size, 8))
+    curves = pd.concat([df.assign(condition=k) for k, df in dyn["curves"].items()])
+    curves.to_csv(out / "projection_dynamics.csv", index=False)
+    ex_rows = []
+    for name, ex in dyn["example"].items():
+        for t, tok in enumerate(ex["tokens"]):
+            ex_rows.append({"condition": name, "t": t, "token": tok, "is_prompt": t < ex["prompt_len"],
+                            **{f"layer_{l}": float(ex["proj"][l, t]) for l in range(ex["proj"].shape[0])}})
+    pd.DataFrame(ex_rows).to_csv(out / "projection_example.csv", index=False)
+    plot_dynamics(dyn, f"{short}: residual-stream projection onto the refusal direction (layer {chosen})",
+                  out / "projection_dynamics.png", out / "projection_dynamics.gif")
+
+    # 4. Transfer.
+    sets = get_transfer_sets(transfer_path, n_transfer, cfg.seed)
+    tr = transfer_study(bundle, sets, r, r_hat, chosen, out, cfg.max_new_tokens, cfg.batch_size)
+    tr.to_csv(out / "transfer.csv", index=False)
+
+    # 5. Re-select the layer with the paper's KL filter; if it differs, repeat 3 and 4 there.
+    sweep = pd.read_csv(cfg.out_dir / "refusal_by_layer.csv")
+    kl_sel = select_layer_with_kl(sweep, cap, bundle.n_layers)
+    kl_layer = kl_sel["layer"]
+    print(f"layer selected with the KL filter: {kl_layer} (main run chose {chosen})", flush=True)
+    if kl_layer != chosen:
+        tr_kl = transfer_study(bundle, sets, r, r_hat, kl_layer, out, cfg.max_new_tokens, cfg.batch_size,
+                               tag=f"_layer{kl_layer}")
+        tr_kl.to_csv(out / f"transfer_layer{kl_layer}.csv", index=False)
+        dyn_kl = dynamics_study(bundle, fmt(splits["harmful_val"]), fmt(splits["harmless_val"]), r, r_hat,
+                                kl_layer, cfg.max_new_tokens, min(cfg.batch_size, 8))
+        pd.concat([df.assign(condition=k) for k, df in dyn_kl["curves"].items()]).to_csv(
+            out / f"projection_dynamics_layer{kl_layer}.csv", index=False)
+        plot_dynamics(dyn_kl, f"{short}: residual-stream projection onto the refusal direction (layer {kl_layer})",
+                      out / f"projection_dynamics_layer{kl_layer}.png", None)
+        kl_sel["transfer"] = tr_kl.to_dict(orient="records")
+        kl_sel["example_refusal"] = {k: v["refusal"] for k, v in dyn_kl["example"].items()}
+
+    chosen_cap = cap[cap["layer"] == chosen].iloc[0]
+    base_cap = cap[cap["layer"] == -1].iloc[0]
+    summary = {
+        "model": cfg.model_name,
+        "chosen_layer": chosen,
+        "direction_cosine_chosen_vs_neighbours": {
+            str(l): float(cos[chosen, l]) for l in range(bundle.n_layers)
+        },
+        "capability": {
+            "baseline_reference_nll": float(base_cap["reference_nll"]),
+            "chosen_ablation_reference_nll": float(chosen_cap["reference_nll"]),
+            "chosen_ablation_kl_mean": float(chosen_cap["kl_mean"]),
+            "n_reference_pairs": n_reference,
+            "n_kl_prompts": len(splits["harmless_val"]),
+        },
+        "transfer": tr.to_dict(orient="records"),
+        "example_refusal": {k: v["refusal"] for k, v in dyn["example"].items()},
+        "kl_selected": kl_sel,
+        "runtime_seconds": round(time.time() - t0, 1),
+    }
+    with open(out / "summary.json", "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=1)
+    return {"summary": summary, "cosine": cos, "capability": cap, "dynamics": dyn, "transfer": tr,
+            "kl_selected": kl_sel}

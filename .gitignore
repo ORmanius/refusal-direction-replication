@@ -17,7 +17,7 @@ results/**/activations*
 
 # completions produced by the ablated model on harmful prompts are kept locally
 # but not published; see README "What is committed".
-results/**/completions_harmful_ablation.jsonl
+results/**/completions_*_ablation*.jsonl
 
 # zips produced by the Colab notebook for download
 *_results.zip

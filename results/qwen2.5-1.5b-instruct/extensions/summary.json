@@ -1,0 +1,127 @@
+{
+ "model": "Qwen/Qwen2.5-1.5B-Instruct",
+ "chosen_layer": 15,
+ "direction_cosine_chosen_vs_neighbours": {
+  "0": 0.06978397071361542,
+  "1": 0.07524768263101578,
+  "2": 0.11048388481140137,
+  "3": 0.04988037794828415,
+  "4": 0.07433916628360748,
+  "5": 0.04418782517313957,
+  "6": 0.11586514115333557,
+  "7": 0.14980459213256836,
+  "8": 0.12776461243629456,
+  "9": 0.2041352391242981,
+  "10": 0.2812122702598572,
+  "11": 0.38050577044487,
+  "12": 0.45598405599594116,
+  "13": 0.6165233850479126,
+  "14": 0.7520931959152222,
+  "15": 0.9999998807907104,
+  "16": 0.7569916248321533,
+  "17": 0.6279697418212891,
+  "18": 0.502750039100647,
+  "19": 0.48381027579307556,
+  "20": 0.3995246887207031,
+  "21": 0.3446265459060669,
+  "22": 0.30504322052001953,
+  "23": 0.27567142248153687,
+  "24": 0.25817716121673584,
+  "25": 0.24869142472743988,
+  "26": 0.2417525053024292,
+  "27": 0.22551752626895905
+ },
+ "capability": {
+  "baseline_reference_nll": 1.4024426937103271,
+  "chosen_ablation_reference_nll": 1.4968082904815674,
+  "chosen_ablation_kl_mean": 0.605987012386322,
+  "n_reference_pairs": 64,
+  "n_kl_prompts": 32
+ },
+ "transfer": [
+  {
+   "set": "harmbench_standard",
+   "n": 64,
+   "layer": 15,
+   "intervention": "ablation",
+   "baseline_refusal_rate": 0.953125,
+   "intervention_refusal_rate": 0.0
+  },
+  {
+   "set": "jbb_harmful",
+   "n": 64,
+   "layer": 15,
+   "intervention": "ablation",
+   "baseline_refusal_rate": 1.0,
+   "intervention_refusal_rate": 0.0
+  },
+  {
+   "set": "jbb_benign",
+   "n": 64,
+   "layer": 15,
+   "intervention": "ablation",
+   "baseline_refusal_rate": 0.515625,
+   "intervention_refusal_rate": 0.0
+  },
+  {
+   "set": "jbb_benign",
+   "n": 64,
+   "layer": 15,
+   "intervention": "addition",
+   "baseline_refusal_rate": 0.515625,
+   "intervention_refusal_rate": 1.0
+  }
+ ],
+ "example_refusal": {
+  "harmless_baseline": false,
+  "harmless_added": true
+ },
+ "kl_selected": {
+  "layer": 21,
+  "kl_mean": 0.042574573308229446,
+  "reference_nll": 1.3977837562561035,
+  "sweep_ablation_refusal_rate_harmful": 0.0,
+  "sweep_addition_refusal_rate_harmless": 1.0,
+  "kl_max": 0.1,
+  "kl_filter_satisfied": true,
+  "transfer": [
+   {
+    "set": "harmbench_standard",
+    "n": 64,
+    "layer": 21,
+    "intervention": "ablation",
+    "baseline_refusal_rate": 0.953125,
+    "intervention_refusal_rate": 0.0
+   },
+   {
+    "set": "jbb_harmful",
+    "n": 64,
+    "layer": 21,
+    "intervention": "ablation",
+    "baseline_refusal_rate": 1.0,
+    "intervention_refusal_rate": 0.0
+   },
+   {
+    "set": "jbb_benign",
+    "n": 64,
+    "layer": 21,
+    "intervention": "ablation",
+    "baseline_refusal_rate": 0.515625,
+    "intervention_refusal_rate": 0.0
+   },
+   {
+    "set": "jbb_benign",
+    "n": 64,
+    "layer": 21,
+    "intervention": "addition",
+    "baseline_refusal_rate": 0.515625,
+    "intervention_refusal_rate": 1.0
+   }
+  ],
+  "example_refusal": {
+   "harmless_baseline": false,
+   "harmless_added": true
+  }
+ },
+ "runtime_seconds": 589.7
+}

@@ -46,12 +46,13 @@ def _walk(
     ablate_dir: torch.Tensor | None = None,
     add_vec: torch.Tensor | None = None,
     add_layer: int | None = None,
-    position: int | None = None,
+    position: int | slice | None = None,
 ) -> list[torch.Tensor] | None:
     """One in-order pass over the residual stream; must be called inside a trace.
 
     Applies the requested interventions and, if `position` is given, returns the
-    (post-intervention) residual at that token position for every decoder layer.
+    (post-intervention) residual at that token position (or slice of positions) for
+    every decoder layer.
     """
     if add_vec is not None and add_layer is None:
         raise ValueError("add_layer is required with add_vec")

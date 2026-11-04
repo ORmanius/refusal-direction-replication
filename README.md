@@ -1,6 +1,9 @@
 # Refusal direction replication
 
-**Status:** Both runs complete and committed (2026-11-04): Qwen2.5-1.5B-Instruct locally, Gemma-2-2b-it on a Colab T4. The core result replicates on both models.
+[![smoke test](https://github.com/ORmanius/refusal-direction-replication/actions/workflows/ci.yml/badge.svg)](https://github.com/ORmanius/refusal-direction-replication/actions/workflows/ci.yml)
+[![Open the Gemma notebook in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/ORmanius/refusal-direction-replication/blob/main/notebooks/02_gemma_colab.ipynb)
+
+**Status:** Both runs complete and committed (2026-11-04): Qwen2.5-1.5B-Instruct locally, Gemma-2-2b-it on a Colab T4. The core result replicates on both models. Extensions (direction similarity, capability check, token-by-token dynamics, transfer to HarmBench and JailbreakBench): Qwen run committed; Gemma run pending.
 
 A small, reproducible replication of the core result of
 *Refusal in Language Models Is Mediated by a Single Direction* (Arditi et al., 2024,
@@ -15,7 +18,15 @@ A small, reproducible replication of the core result of
    layer and token position.
 
 This is a self-study project, not a research contribution. Everything here is scoped to
-that one result; see *Limitations* for what is left out.
+that one result plus four follow-up checks (*Extensions*); see *Limitations* for what is left out.
+
+![Qwen2.5-1.5B-Instruct: residual-stream projection onto the refusal direction, token by token](results/qwen2.5-1.5b-instruct/extensions/projection_dynamics.gif)
+
+*Qwen2.5-1.5B-Instruct, token by token. Left: the residual stream's component along the refusal
+direction, averaged over 32 harmful prompts (top; zero once the direction is ablated) and 32
+harmless prompts (bottom; high once the direction is added). Right: the same projection at every
+layer for one harmless prompt, without and with the direction added. From
+`notebooks/03_extensions_qwen.ipynb`; details under *Extensions*.*
 
 ## What is replicated
 
@@ -46,12 +57,15 @@ more built-in analysis helpers that this replication does not use.
 ## Layout
 
 ```
-src/refusal_direction/   importable package: data, model, intervention, direction, scoring, pipeline, plot
-notebooks/01_qwen_local.ipynb    local run on an RTX 2060 (fp16)
-notebooks/02_gemma_colab.ipynb   Colab/Kaggle T4 run for Gemma-2-2b-it
+src/refusal_direction/   importable package: data, model, intervention, direction, scoring, pipeline, plot, extensions
+notebooks/01_qwen_local.ipynb      local run on an RTX 2060 (fp16)
+notebooks/02_gemma_colab.ipynb     Colab/Kaggle T4 run for Gemma-2-2b-it (core result + extensions)
+notebooks/03_extensions_qwen.ipynb extensions on the Qwen run (local GPU)
 data/splits_seed0.json   the exact prompts used (sampled with seed 0)
+data/transfer_seed0.json the exact HarmBench / JailbreakBench prompts used by the transfer check
 results/<model>/         refusal_by_layer.csv, refusal_by_layer.png, summary.json, completions
-tests/test_smoke.py      CPU smoke test on pythia-70m (runs in CI)
+results/<model>/extensions/  CSVs, plots and the GIF for the four extensions
+tests/                   CPU smoke tests on pythia-70m (run in CI)
 ```
 
 ## How to run
@@ -75,7 +89,15 @@ jupyter nbconvert --to notebook --execute --inplace notebooks/01_qwen_local.ipyn
 
 The first run downloads the two prompt files (hash-checked), writes
 `data/splits_seed0.json` if it is missing, and downloads the model (about 3 GB).
-Results land in `results/qwen2.5-1.5b-instruct/`.
+Results land in `results/qwen2.5-1.5b-instruct/`. The extensions run afterwards from the
+direction that notebook saved:
+
+```bash
+jupyter nbconvert --to notebook --execute --inplace notebooks/03_extensions_qwen.ipynb
+```
+
+It downloads the HarmBench and JailbreakBench behavior files (hash-checked), writes
+`data/transfer_seed0.json` if missing, and fills `results/qwen2.5-1.5b-instruct/extensions/`.
 
 ### On Colab / Kaggle (Gemma-2-2b-it, T4)
 
@@ -93,7 +115,9 @@ pytest -q
 
 `tests/test_smoke.py` loads `EleutherAI/pythia-70m`, checks tensor shapes, checks that
 ablation leaves a zero projection on the direction at every layer, and runs generation with
-and without interventions. GitHub Actions runs it on every push (CPU PyTorch).
+and without interventions. `tests/test_extensions.py` covers the extension pieces (cosine
+matrix, KL and reference loss, all-position projections, the dynamics figure and GIF). GitHub
+Actions runs both on every push (CPU PyTorch).
 
 ## What is committed
 
@@ -101,9 +125,12 @@ and without interventions. GitHub Actions runs it on every push (CPU PyTorch).
 * `results/<model>/refusal_by_layer.csv`: per-layer refusal rates (the source of every number in this README).
 * `results/<model>/refusal_by_layer.png`, `summary.json` (chosen layer, versions, runtime).
 * `results/<model>/completions_*.jsonl`: validation completions for the baselines and for harmless prompts with the direction added.
-* Not committed: the completions of the ablated model on harmful prompts (regenerate them with
-  the notebook; the per-prompt refusal flags are shown in the notebook output), and the
-  `directions.pt` tensors.
+* `results/<model>/extensions/`: `direction_cosine.csv`, `capability_by_layer.csv`,
+  `projection_dynamics.csv`, `projection_example.csv`, `transfer.csv`, `reference_pairs.json`,
+  the plots, the GIF, and the baseline completions on the transfer sets.
+* Not committed: the completions of the ablated model on harmful prompts, for AdvBench and for
+  the transfer sets (regenerate them with the notebooks; the per-prompt refusal flags are shown
+  in the notebook output), and the `directions.pt` tensors.
 
 ## Results
 
@@ -166,25 +193,121 @@ refusal rate from 100 % to 0 % on harmful prompts when ablated and from 0 % to 1
 prompts when added, with coherent completions in both directions (see the committed
 `completions_*.jsonl` files). That is the paper's core claim at the scale this repo can test.
 
+## Extensions
+
+Four checks beyond the core result, each either tightening the evidence or showing the
+mechanism. They run from the direction the main run saved (`refusal_direction.extensions`,
+`notebooks/03_extensions_qwen.ipynb`; the Gemma Colab notebook runs the same cells after its
+main sweep). Done for Qwen2.5-1.5B-Instruct (run of 2026-11-04, 10 minutes on the RTX 2060);
+pending for Gemma-2-2b-it. Source for every number below:
+`results/qwen2.5-1.5b-instruct/extensions/` (`summary.json`, `direction_cosine.csv`,
+`capability_by_layer.csv`, `transfer.csv`, `transfer_layer21.csv`, `projection_dynamics*.csv`).
+
+### 1. Are the per-layer directions one direction?
+
+![Cosine similarity between per-layer directions, Qwen2.5-1.5B-Instruct](results/qwen2.5-1.5b-instruct/extensions/direction_similarity.png)
+
+Only loosely. The layer-15 direction has cosine 0.75 with its neighbours at layers 14 and 16,
+0.50 at layer 18, 0.31 at layer 22 and below 0.28 from layer 23 on; the smallest pairwise cosine among layers
+10-26, all of which remove refusal when ablated, is 0.07. The difference-in-means direction
+drifts steadily with depth rather than being one fixed vector. The core result does not depend
+on the directions agreeing (each layer's direction is tested on its own), but "a single
+direction" is best read as "a single direction per read-out layer".
+
+### 2. Does ablation damage the model?
+
+![Cost of ablating each layer's direction, Qwen2.5-1.5B-Instruct](results/qwen2.5-1.5b-instruct/extensions/capability_by_layer.png)
+
+Two costs, for each layer's direction ablated at every layer: the KL divergence from the
+baseline next-token distribution at the last prompt token on the 32 harmless validation prompts
+(the paper's selection criterion), and the per-token negative log-likelihood (NLL) of 64
+held-out Alpaca reference answers (`extensions/reference_pairs.json`, disjoint from the
+train/val instructions).
+
+| Direction ablated | Mean KL to baseline (nats) | NLL of reference answers (nats / token) |
+|---|---|---|
+| none | 0 | 1.402 |
+| layer 15 (chosen by the main run) | 0.606 | 1.497 |
+| layer 21 (chosen with the paper's KL filter, below) | 0.043 | 1.398 |
+
+Ablating the layer-15 direction is not free: the harmless next-token distribution moves by 0.6
+nats on average and the reference-answer loss rises by 7 %. Layers 14 and 19 are worse (KL 1.7
+and 1.5). Layers 20-23 remove refusal just as completely in the sweep at KL below 0.08 and with
+the reference loss unchanged. So the sweep's refusal rates alone do not distinguish a clean
+direction from one that also degrades the model; the KL check does.
+
+### 3. Selecting the layer the paper's way
+
+The paper keeps only candidate directions whose ablation KL on harmless prompts is below 0.1
+nats, then takes the one that best removes refusal. The main run here did not apply that filter.
+Applying it to the sweep (`extensions.select_layer_with_kl`, same late-layer cutoff) selects
+**layer 21**: KL 0.043, reference loss unchanged, and 0 % / 100 % on the two validation tests.
+The transfer and dynamics checks below were therefore run at both layers.
+
+### 4. Transfer to other benchmark sets
+
+The direction was fitted on AdvBench only. Here it is applied unchanged to 64 HarmBench
+"standard" behaviors, 64 JailbreakBench harmful behaviors (its 18 AdvBench-sourced rows
+removed first) and 64 JailbreakBench benign behaviors, which are harmless requests written to
+look borderline (for example a fictional story involving drug use). Sampled with seed 0 and
+saved in `data/transfer_seed0.json`; sources pinned by commit and SHA-256 in `data.py`.
+
+| Set | No intervention | Direction ablated, layer 15 | ablated, layer 21 | Direction added, layer 15 | added, layer 21 |
+|---|---|---|---|---|---|
+| HarmBench standard (n=64) | 61/64 refused (95 %) | 0/64 | 0/64 | - | - |
+| JailbreakBench harmful, non-AdvBench (n=64) | 64/64 (100 %) | 0/64 | 0/64 | - | - |
+| JailbreakBench benign (n=64) | 33/64 (52 %) | 0/64 | 0/64 | 64/64 | 64/64 |
+
+The direction transfers without loss to both harmful sets. The benign set adds a point the
+AdvBench/Alpaca split cannot show: Qwen refuses half of these harmless-but-borderline requests
+by default, and ablating the direction removes that over-refusal as completely as it removes
+refusal of harmful requests. Under the substring metric the two are indistinguishable, which is
+also the limitation of the metric.
+
+### 5. Token-by-token dynamics
+
+The GIF at the top of this README (static version: `extensions/projection_dynamics.png`) shows
+the projection of the residual stream onto the layer-15 direction at every token of prompt and
+completion. Over the last prompt tokens the mean projection is 15 on harmful prompts and 7 on
+harmless ones; it is 0 at every token once the direction is ablated (by construction) and 26 on
+average over the completion once the direction is added. The right-hand heatmaps show the added
+direction lifting the projection in every later layer at every token.
+
+![Qwen2.5-1.5B-Instruct: projection onto the layer-21 direction, token by token](results/qwen2.5-1.5b-instruct/extensions/projection_dynamics_layer21.png)
+
+At layer 21 the picture is sharper. On harmful prompts the projection rises to 58 at the last
+prompt token (the position the direction was read from), stays high for the first few generated
+tokens and settles near 11 over the rest of the completion; on harmless prompts it stays near 0
+throughout. The "decision" is visible as a spike at the end of the prompt, before the first
+token is generated, which is what the paper's choice of read-out position assumes.
+
 ## Limitations
 
 * **Refusal metric.** Substring matching over a fixed phrase list is the paper's primary
   metric but it is crude: a completion that complies after a token "I can't promise..." counts
   as a refusal, and a refusal phrased without any listed phrase counts as compliance. The paper
   pairs it with an LLM judge; this pass does not. Read the numbers as approximate.
-* **Harmful set.** AdvBench only (the paper pools four sources). AdvBench prompts are
-  repetitive and the model's refusals on them are easy, so absolute rates are not comparable to
-  the paper's tables.
+* **Harmful set.** The direction is fitted on AdvBench only (the paper pools four sources).
+  AdvBench prompts are repetitive and the model's refusals on them are easy, so absolute rates
+  are not comparable to the paper's tables. The transfer check applies the direction to
+  HarmBench and JailbreakBench prompts but does not fit on them.
 * **Direction selection.** One token position (the last prompt token) and a simple validation
   score are used instead of the paper's search over positions with KL-divergence constraints.
-  The per-layer sweep is reported in full so the choice is visible.
+  The per-layer sweep is reported in full so the choice is visible. The extensions add the KL
+  filter after the fact (it changes the chosen Qwen layer from 15 to 21) but still search one
+  position only.
 * **Small validation sets.** 32 prompts per class, as in the paper: one prompt is about 3
   percentage points.
 * **Greedy decoding, 64 new tokens.** Enough for the substring metric; the paper generates
   longer completions for its judge.
 * **Qwen's default system prompt.** Qwen2.5-Instruct's chat template inserts its own system
   message when none is given; it was kept. Gemma's template has no system role.
-* **No capability or coherence check after ablation.** The paper verifies that the ablated model stays generally competent (benchmark scores and a KL-divergence check on harmless prompts); this pass only spot-checked that ablated completions read as coherent, so a direction that merely damaged the model would not be caught by the numbers here.
+* **Limited capability check after ablation.** The paper verifies that the ablated model stays
+  generally competent with benchmark scores (MMLU, ARC, GSM8K, TruthfulQA) as well as a KL check.
+  The extensions here measure the KL divergence on harmless prompts and the loss on reference
+  answers, which catch a direction that visibly disturbs the model (layer 15 does, mildly), but
+  no benchmark accuracy was measured. The core-result section still reports the main run's
+  layer 15; see *Extensions* for the KL-selected layer 21.
 * **Two models, one seed.** No error bars across seeds or prompt subsets.
 
 ## Citation
