@@ -1,0 +1,20 @@
+# environments and caches
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ipynb_checkpoints/
+*.egg-info/
+build/
+dist/
+
+# downloaded raw datasets (re-fetched with a hash check by refusal_direction.data)
+data/raw/
+
+# large intermediates
+results/**/*.pt
+results/**/activations*
+
+# completions produced by the ablated model on harmful prompts are kept locally
+# but not published; see README "What is committed".
+results/**/completions_harmful_ablation.jsonl

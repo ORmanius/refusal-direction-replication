@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "refusal-direction"
+version = "0.1.0"
+description = "Replication of 'Refusal in Language Models Is Mediated by a Single Direction' (Arditi et al., 2024)"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Roman Iliushchenko" }]
+requires-python = ">=3.11"
+# torch is installed separately so the CUDA / CPU build can be chosen (see README);
+# the version is pinned here for the resolver.
+dependencies = [
+    "torch==TORCH_PIN",
+    "nnsight==NNSIGHT_PIN",
+    "transformers==TRANSFORMERS_PIN",
+    "accelerate==ACCELERATE_PIN",
+    "numpy==NUMPY_PIN",
+    "pandas==PANDAS_PIN",
+    "matplotlib==MATPLOTLIB_PIN",
+]
+
+[project.optional-dependencies]
+test = ["pytest==PYTEST_PIN"]
+notebook = ["jupyter", "ipykernel", "nbformat", "nbconvert"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
