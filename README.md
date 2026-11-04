@@ -156,6 +156,7 @@ model; the T4 run has not been done yet.
   longer completions for its judge.
 * **Qwen's default system prompt.** Qwen2.5-Instruct's chat template inserts its own system
   message when none is given; it was kept. Gemma's template has no system role.
+* **No capability or coherence check after ablation.** The paper verifies that the ablated model stays generally competent (benchmark scores and a KL-divergence check on harmless prompts); this pass only spot-checked that ablated completions read as coherent, so a direction that merely damaged the model would not be caught by the numbers here.
 * **Two models, one seed.** No error bars across seeds or prompt subsets.
 
 ## Citation
