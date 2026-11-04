@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import torch
-from nnsight import LanguageModel
+from nnsight import TransformersModel
 
 # Where the decoder layers and token embedding live, per Hugging Face model_type.
 _PATHS: dict[str, tuple[str, str]] = {
@@ -39,7 +39,7 @@ def _resolve(root: Any, dotted: str) -> Any:
 
 @dataclass
 class ModelBundle:
-    lm: LanguageModel
+    lm: TransformersModel
     name: str
     n_layers: int
     d_model: int
@@ -62,7 +62,7 @@ class ModelBundle:
 
     @property
     def hf_model(self) -> torch.nn.Module:
-        return self.lm._model
+        return self.lm.pipeline.model
 
     @property
     def device(self) -> torch.device:
@@ -80,12 +80,12 @@ def load_model(
     attn_implementation: str | None = None,
     hf_token: str | None = None,
 ) -> ModelBundle:
-    kwargs: dict[str, Any] = {"device_map": device_map, "torch_dtype": dtype, "dispatch": True}
+    kwargs: dict[str, Any] = {"device_map": device_map, "dtype": dtype, "dispatch": True}
     if attn_implementation:
         kwargs["attn_implementation"] = attn_implementation
     if hf_token:
         kwargs["token"] = hf_token
-    lm = LanguageModel(name, **kwargs)
+    lm = TransformersModel(name, task="text-generation", **kwargs)
     tok = lm.tokenizer
     tok.padding_side = "left"
     if tok.pad_token is None:

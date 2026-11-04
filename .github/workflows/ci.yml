@@ -12,7 +12,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
           cache: pip
       - name: Cache Hugging Face models
         uses: actions/cache@v4
@@ -22,7 +22,7 @@ jobs:
       - name: Install CPU PyTorch
         run: pip install "torch==${{ env.TORCH_VERSION }}" --index-url https://download.pytorch.org/whl/cpu
         env:
-          TORCH_VERSION: "TORCH_VERSION_PLACEHOLDER"
+          TORCH_VERSION: "2.14.1"
       - name: Install package
         run: pip install -e ".[test]"
       - name: Run smoke test

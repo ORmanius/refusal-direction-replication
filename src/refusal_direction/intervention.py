@@ -12,9 +12,16 @@ Both interventions follow Arditi et al. (2024):
 * Activation addition adds the raw difference-in-means vector r (not normalised) at
   a single layer, at every token position:
       x <- x + r
+
+NNsight runs the body of a `with model.trace(...)` block in lockstep with the forward
+pass and requires module outputs to be requested in execution order, so every
+intervention here is a single ordered walk over [embedding, layer 0, ..., layer L-1]
+that reads, edits and (optionally) records each module's output exactly once.
 """
 
 from __future__ import annotations
+
+import warnings
 
 import torch
 
@@ -34,27 +41,41 @@ def _set_resid(bundle: ModelBundle, module, new: torch.Tensor) -> None:
         module.output[:] = new
 
 
-def _apply_ablation(bundle: ModelBundle, direction: torch.Tensor) -> None:
-    d = direction.to(bundle.device, bundle.dtype)
-    for module in [bundle.embed, *bundle.layers]:
+def _walk(
+    bundle: ModelBundle,
+    ablate_dir: torch.Tensor | None = None,
+    add_vec: torch.Tensor | None = None,
+    add_layer: int | None = None,
+    position: int | None = None,
+) -> list[torch.Tensor] | None:
+    """One in-order pass over the residual stream; must be called inside a trace.
+
+    Applies the requested interventions and, if `position` is given, returns the
+    (post-intervention) residual at that token position for every decoder layer.
+    """
+    if add_vec is not None and add_layer is None:
+        raise ValueError("add_layer is required with add_vec")
+    d = ablate_dir.to(bundle.device, bundle.dtype) if ablate_dir is not None else None
+    v = add_vec.to(bundle.device, bundle.dtype) if add_vec is not None else None
+    collected: list[torch.Tensor] = []
+
+    modules = [bundle.embed, *bundle.layers]
+    for i, module in enumerate(modules):
+        layer = i - 1  # -1 is the embedding
+        needs_edit = d is not None or (v is not None and layer == add_layer)
+        needs_read = needs_edit or (position is not None and layer >= 0)
+        if not needs_read:
+            continue
         x = _resid(bundle, module)
-        proj = (x * d).sum(-1, keepdim=True)
-        _set_resid(bundle, module, x - proj * d)
-
-
-def _apply_addition(bundle: ModelBundle, vec: torch.Tensor, layer: int) -> None:
-    v = vec.to(bundle.device, bundle.dtype)
-    module = bundle.layers[layer]
-    _set_resid(bundle, module, _resid(bundle, module) + v)
-
-
-def _apply(bundle, ablate_dir, add_vec, add_layer) -> None:
-    if ablate_dir is not None:
-        _apply_ablation(bundle, ablate_dir)
-    if add_vec is not None:
-        if add_layer is None:
-            raise ValueError("add_layer is required with add_vec")
-        _apply_addition(bundle, add_vec, add_layer)
+        if d is not None:
+            x = x - (x * d).sum(-1, keepdim=True) * d
+        if v is not None and layer == add_layer:
+            x = x + v
+        if needs_edit:
+            _set_resid(bundle, module, x)
+        if position is not None and layer >= 0:
+            collected.append(x[:, position, :])
+    return collected if position is not None else None
 
 
 def _batches(items: list, size: int):
@@ -80,12 +101,10 @@ def capture_residuals(
     for batch in _batches(prompts, batch_size):
         enc = tokenize(bundle, batch).to(bundle.device)
         with bundle.lm.trace(enc):
-            _apply(bundle, ablate_dir, None, None)
-            saved = [
-                _resid(bundle, layer)[:, position, :].float().cpu().save()
-                for layer in bundle.layers
-            ]
-        out_batches.append(torch.stack([value(s) for s in saved], dim=1))
+            cols = _walk(bundle, ablate_dir=ablate_dir, position=position)
+            # NNsight hands back the values bound by name in this block: one tensor.
+            stacked = torch.stack(cols, dim=1).float().cpu().save()
+        out_batches.append(value(stacked))
     return torch.cat(out_batches, dim=0)
 
 
@@ -105,8 +124,7 @@ def generate(
     for batch in _batches(prompts, batch_size):
         enc = tokenize(bundle, batch).to(bundle.device)
         n_in = enc["input_ids"].shape[1]
-        with bundle.lm.generate(
-            enc,
+        with warnings.catch_warnings(), bundle.lm.generate(
             max_new_tokens=max_new_tokens,
             do_sample=False,
             temperature=None,
@@ -114,9 +132,16 @@ def generate(
             top_k=None,
             pad_token_id=tok.pad_token_id,
         ) as tracer:
-            with tracer.all():
-                _apply(bundle, ablate_dir, add_vec, add_layer)
-            out = bundle.lm.generator.output.save()
+            # The intervention loop is cut short when generation stops early (EOS),
+            # so the result is read in a separate invoke block, as NNsight advises.
+            # NNsight warns about the cut-short loop every time; that is expected here.
+            warnings.filterwarnings("ignore", message=".*was never reached.*")
+            with tracer.invoke(enc):
+                if ablate_dir is not None or add_vec is not None:
+                    for _ in tracer.all():
+                        _walk(bundle, ablate_dir=ablate_dir, add_vec=add_vec, add_layer=add_layer)
+            with tracer.invoke():
+                out = tracer.result.save()
         ids = value(out)[:, n_in:]
         completions.extend(tok.batch_decode(ids, skip_special_tokens=True))
     return completions
