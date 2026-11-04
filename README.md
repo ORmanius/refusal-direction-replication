@@ -56,7 +56,54 @@ tests/test_smoke.py      CPU smoke test on pythia-70m (runs in CI)
 
 ## How to run
 
-Pending: instructions will be filled in once the local run is complete.
+### Locally (Qwen2.5-1.5B-Instruct, 6 GB GPU)
+
+Python 3.12 or newer (the pinned NumPy needs 3.12). Install PyTorch first so you can pick the
+CUDA build, then the package:
+
+```bash
+python -m venv .venv && .venv/Scripts/activate      # or source .venv/bin/activate
+pip install torch==2.14.1 --index-url https://download.pytorch.org/whl/cu126
+pip install -e ".[test,notebook]"
+```
+
+Then either run the notebook or execute it headlessly:
+
+```bash
+jupyter nbconvert --to notebook --execute --inplace notebooks/01_qwen_local.ipynb
+```
+
+The first run downloads the two prompt files (hash-checked), writes
+`data/splits_seed0.json` if it is missing, and downloads the model (about 3 GB).
+Results land in `results/qwen2.5-1.5b-instruct/`.
+
+### On Colab / Kaggle (Gemma-2-2b-it, T4)
+
+Open `notebooks/02_gemma_colab.ipynb` in Colab with a T4 runtime. It clones this repo,
+installs the package, loads Gemma with your Hugging Face token (Gemma is gated), runs the same
+pipeline and offers a zip of `results/gemma-2-2b-it/` to download and commit. The notebook's
+first cell lists the exact steps. The Colab cells were tested on CPU with `pythia-70m` by setting
+`REFUSAL_SMOKE=1`; the Gemma run itself has to happen on the T4.
+
+### Tests
+
+```bash
+pytest -q
+```
+
+`tests/test_smoke.py` loads `EleutherAI/pythia-70m`, checks tensor shapes, checks that
+ablation leaves a zero projection on the direction at every layer, and runs generation with
+and without interventions. GitHub Actions runs it on every push (CPU PyTorch).
+
+## What is committed
+
+* `data/splits_seed0.json`: the exact 128 + 32 harmful and 128 + 32 harmless instructions used.
+* `results/<model>/refusal_by_layer.csv`: per-layer refusal rates (the source of every number in this README).
+* `results/<model>/refusal_by_layer.png`, `summary.json` (chosen layer, versions, runtime).
+* `results/<model>/completions_*.jsonl`: validation completions for the baselines and for harmless prompts with the direction added.
+* Not committed: the completions of the ablated model on harmful prompts (regenerate them with
+  the notebook; the per-prompt refusal flags are shown in the notebook output), and the
+  `directions.pt` tensors.
 
 ## Results
 
@@ -64,7 +111,23 @@ Pending.
 
 ## Limitations
 
-Pending.
+* **Refusal metric.** Substring matching over a fixed phrase list is the paper's primary
+  metric but it is crude: a completion that complies after a token "I can't promise..." counts
+  as a refusal, and a refusal phrased without any listed phrase counts as compliance. The paper
+  pairs it with an LLM judge; this pass does not. Read the numbers as approximate.
+* **Harmful set.** AdvBench only (the paper pools four sources). AdvBench prompts are
+  repetitive and the model's refusals on them are easy, so absolute rates are not comparable to
+  the paper's tables.
+* **Direction selection.** One token position (the last prompt token) and a simple validation
+  score are used instead of the paper's search over positions with KL-divergence constraints.
+  The per-layer sweep is reported in full so the choice is visible.
+* **Small validation sets.** 32 prompts per class, as in the paper: one prompt is about 3
+  percentage points.
+* **Greedy decoding, 64 new tokens.** Enough for the substring metric; the paper generates
+  longer completions for its judge.
+* **Qwen's default system prompt.** Qwen2.5-Instruct's chat template inserts its own system
+  message when none is given; it was kept. Gemma's template has no system role.
+* **Two models, one seed.** No error bars across seeds or prompt subsets.
 
 ## Citation
 
