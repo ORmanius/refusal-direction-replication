@@ -57,14 +57,22 @@ def direction_cosine(r_hat: torch.Tensor) -> np.ndarray:
 
 @torch.no_grad()
 def last_token_logprobs(
-    bundle: ModelBundle, prompts: list[str], batch_size: int = 16, ablate_dir: torch.Tensor | None = None
+    bundle: ModelBundle,
+    prompts: list[str],
+    batch_size: int = 16,
+    ablate_dir: torch.Tensor | None = None,
+    add_vec: torch.Tensor | None = None,
+    add_layer: int | None = None,
+    ablate_scale: float = 1.0,
+    add_scale: float = 1.0,
 ) -> torch.Tensor:
     """Log-probabilities of the next token at the last prompt position, [n, vocab] float32 CPU."""
     out = []
     for batch in _batches(prompts, batch_size):
         enc = tokenize(bundle, batch).to(bundle.device)
         with bundle.lm.trace(enc):
-            _walk(bundle, ablate_dir=ablate_dir)
+            _walk(bundle, ablate_dir=ablate_dir, add_vec=add_vec, add_layer=add_layer,
+                  ablate_scale=ablate_scale, add_scale=add_scale)
             lp = torch.log_softmax(bundle.lm.output.logits[:, -1, :].float(), dim=-1).cpu().save()
         out.append(value(lp))
     return torch.cat(out, dim=0)
@@ -295,7 +303,77 @@ def transfer_study(
     return pd.DataFrame(rows)
 
 
-# 5. Layer selection with the paper's KL constraint ---------------------------------------
+# 5. Dose-response -----------------------------------------------------------------------
+
+ADD_COEFS = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0, 1.2, 1.4, 1.6]
+ABL_COEFS = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+
+
+def refusal_first_token_ids(bundle: ModelBundle, completions: list[str]) -> list[int]:
+    """Token ids that start the refusals among `completions` (the model's own refusal openers)."""
+    tok = bundle.tokenizer
+    ids = set()
+    for c in completions:
+        if is_refusal(c) and c.strip():
+            ids.add(tok.encode(c, add_special_tokens=False)[0])
+    return sorted(ids)
+
+
+def dose_response_study(
+    bundle: ModelBundle,
+    harmful: list[str],
+    harmless: list[str],
+    r: torch.Tensor,
+    r_hat: torch.Tensor,
+    layer: int,
+    harmless_example: tuple[str, str],
+    benign_example: tuple[str, str],
+    add_coefs: list[float] = ADD_COEFS,
+    abl_coefs: list[float] = ABL_COEFS,
+    max_new_tokens: int = 64,
+    batch_size: int = 16,
+) -> dict:
+    """Refusal as a function of intervention strength.
+
+    Addition: x <- x + a r at `layer`, on the harmless validation prompts, a in `add_coefs`.
+    Ablation: x <- x - a (x . r_hat) r_hat at every layer, on the harmful validation prompts,
+    a in `abl_coefs` (a = 1 is the paper's full ablation). For every strength: the refusal rate,
+    the probability mass the model puts on its own refusal-opening tokens at the first generated
+    position, and one example completion. `harmless_example` is (instruction, formatted prompt)
+    for the addition side; `benign_example` is a harmless-but-over-refused prompt for the ablation
+    side, so that no harmful completion needs to be displayed."""
+    base_harmful = generate(bundle, harmful, max_new_tokens, batch_size)
+    ref_ids = refusal_first_token_ids(bundle, base_harmful)
+    rows, examples = [], []
+
+    def mass(lp: torch.Tensor) -> float:
+        return float(lp[:, ref_ids].exp().sum(-1).mean()) if ref_ids else float("nan")
+
+    for a in add_coefs:
+        kw = dict(add_vec=r[layer], add_layer=layer, add_scale=a)
+        comps = generate(bundle, harmless, max_new_tokens, batch_size, **kw)
+        lp = last_token_logprobs(bundle, harmless, batch_size, **kw)
+        ex = generate(bundle, [harmless_example[1]], max_new_tokens, 1, **kw)[0]
+        rows.append({"kind": "addition_harmless", "layer": layer, "coef": a,
+                     "refusal_rate": refusal_rate(comps), "p_refusal_first_token": mass(lp)})
+        examples.append({"kind": "addition_harmless", "coef": a, "instruction": harmless_example[0],
+                         "completion": ex, "refusal": is_refusal(ex)})
+        print(f"addition a={a:.1f}: refusal {rows[-1]['refusal_rate']:.3f}  p(refusal token) {rows[-1]['p_refusal_first_token']:.3f}", flush=True)
+    for a in abl_coefs:
+        kw = dict(ablate_dir=r_hat[layer], ablate_scale=a)
+        comps = generate(bundle, harmful, max_new_tokens, batch_size, **kw)
+        lp = last_token_logprobs(bundle, harmful, batch_size, **kw)
+        ex = generate(bundle, [benign_example[1]], max_new_tokens, 1, **kw)[0]
+        rows.append({"kind": "ablation_harmful", "layer": layer, "coef": a,
+                     "refusal_rate": refusal_rate(comps), "p_refusal_first_token": mass(lp)})
+        examples.append({"kind": "ablation_benign_example", "coef": a, "instruction": benign_example[0],
+                         "completion": ex, "refusal": is_refusal(ex)})
+        print(f"ablation a={a:.1f}: refusal {rows[-1]['refusal_rate']:.3f}  p(refusal token) {rows[-1]['p_refusal_first_token']:.3f}", flush=True)
+    return {"rows": pd.DataFrame(rows), "examples": examples, "layer": layer,
+            "refusal_first_tokens": [bundle.tokenizer.decode([i]) for i in ref_ids]}
+
+
+# 6. Layer selection with the paper's KL constraint ---------------------------------------
 
 
 def select_layer_with_kl(
@@ -348,7 +426,7 @@ def run_extensions(
     n_reference: int = 64,
     layers: list[int] | None = None,
 ) -> dict:
-    from .plot import plot_capability_by_layer, plot_direction_similarity, plot_dynamics
+    from .plot import plot_capability_by_layer, plot_direction_similarity, plot_dose_response, plot_dynamics
 
     t0 = time.time()
     set_seed(cfg.seed)
@@ -385,30 +463,52 @@ def run_extensions(
                             **{f"layer_{l}": float(ex["proj"][l, t]) for l in range(ex["proj"].shape[0])}})
     pd.DataFrame(ex_rows).to_csv(out / "projection_example.csv", index=False)
     plot_dynamics(dyn, f"{short}: residual-stream projection onto the refusal direction (layer {chosen})",
-                  out / "projection_dynamics.png", out / "projection_dynamics.gif")
+                  out / "projection_dynamics.png")
 
     # 4. Transfer.
     sets = get_transfer_sets(transfer_path, n_transfer, cfg.seed)
     tr = transfer_study(bundle, sets, r, r_hat, chosen, out, cfg.max_new_tokens, cfg.batch_size)
     tr.to_csv(out / "transfer.csv", index=False)
 
-    # 5. Re-select the layer with the paper's KL filter; if it differs, repeat 3 and 4 there.
+    # 5. Dose-response at the chosen layer. The ablation-side example is the first benign
+    # JailbreakBench prompt the unmodified model refused (if any; else the first one).
+    benign_base = [json.loads(l) for l in open(out / "completions_jbb_benign_baseline.jsonl", encoding="utf-8")]
+    benign_instr = next((b["instruction"] for b in benign_base if is_refusal(b["completion"])), benign_base[0]["instruction"])
+    harmless_ex = (splits["harmless_val"][0], fmt([splits["harmless_val"][0]])[0])
+    benign_ex = (benign_instr, fmt([benign_instr])[0])
+
+    def dose_at(layer: int, tag: str) -> dict:
+        d = dose_response_study(bundle, fmt(splits["harmful_val"]), fmt(splits["harmless_val"]), r, r_hat, layer,
+                                harmless_ex, benign_ex, max_new_tokens=cfg.max_new_tokens, batch_size=cfg.batch_size)
+        d["rows"].to_csv(out / f"dose_response{tag}.csv", index=False)
+        with open(out / f"dose_response_examples{tag}.jsonl", "w", encoding="utf-8") as f:
+            for e in d["examples"]:
+                f.write(json.dumps(e, ensure_ascii=False) + "\n")
+        plot_dose_response(d, f"{short}: refusal as a function of intervention strength (layer {layer})",
+                           out / f"dose_response{tag}.png", out / f"dose_response{tag}.gif")
+        return d
+
+    dose = dose_at(chosen, "")
+
+    # 6. Re-select the layer with the paper's KL filter; if it differs, repeat 3, 4 and 5 there.
     sweep = pd.read_csv(cfg.out_dir / "refusal_by_layer.csv")
     kl_sel = select_layer_with_kl(sweep, cap, bundle.n_layers)
     kl_layer = kl_sel["layer"]
     print(f"layer selected with the KL filter: {kl_layer} (main run chose {chosen})", flush=True)
     if kl_layer != chosen:
-        tr_kl = transfer_study(bundle, sets, r, r_hat, kl_layer, out, cfg.max_new_tokens, cfg.batch_size,
-                               tag=f"_layer{kl_layer}")
-        tr_kl.to_csv(out / f"transfer_layer{kl_layer}.csv", index=False)
+        tag = f"_layer{kl_layer}"
+        tr_kl = transfer_study(bundle, sets, r, r_hat, kl_layer, out, cfg.max_new_tokens, cfg.batch_size, tag=tag)
+        tr_kl.to_csv(out / f"transfer{tag}.csv", index=False)
         dyn_kl = dynamics_study(bundle, fmt(splits["harmful_val"]), fmt(splits["harmless_val"]), r, r_hat,
                                 kl_layer, cfg.max_new_tokens, min(cfg.batch_size, 8))
         pd.concat([df.assign(condition=k) for k, df in dyn_kl["curves"].items()]).to_csv(
-            out / f"projection_dynamics_layer{kl_layer}.csv", index=False)
+            out / f"projection_dynamics{tag}.csv", index=False)
         plot_dynamics(dyn_kl, f"{short}: residual-stream projection onto the refusal direction (layer {kl_layer})",
-                      out / f"projection_dynamics_layer{kl_layer}.png", None)
+                      out / f"projection_dynamics{tag}.png")
+        dose_kl = dose_at(kl_layer, tag)
         kl_sel["transfer"] = tr_kl.to_dict(orient="records")
         kl_sel["example_refusal"] = {k: v["refusal"] for k, v in dyn_kl["example"].items()}
+        kl_sel["dose_response"] = dose_kl["rows"].to_dict(orient="records")
 
     chosen_cap = cap[cap["layer"] == chosen].iloc[0]
     base_cap = cap[cap["layer"] == -1].iloc[0]
@@ -427,10 +527,13 @@ def run_extensions(
         },
         "transfer": tr.to_dict(orient="records"),
         "example_refusal": {k: v["refusal"] for k, v in dyn["example"].items()},
+        "dose_response": dose["rows"].to_dict(orient="records"),
+        "dose_response_refusal_first_tokens": dose["refusal_first_tokens"],
+        "dose_response_examples": {"harmless": harmless_ex[0], "benign": benign_ex[0]},
         "kl_selected": kl_sel,
         "runtime_seconds": round(time.time() - t0, 1),
     }
     with open(out / "summary.json", "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=1)
     return {"summary": summary, "cosine": cos, "capability": cap, "dynamics": dyn, "transfer": tr,
-            "kl_selected": kl_sel}
+            "dose_response": dose, "kl_selected": kl_sel}

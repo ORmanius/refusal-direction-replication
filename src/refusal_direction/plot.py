@@ -165,32 +165,117 @@ def _dynamics_figure(dyn: dict, title: str):
     return fig, lines, images, len(ks)
 
 
-def plot_dynamics(dyn: dict, title: str, out_png: Path, out_gif: Path | None = None, fps: int = 8) -> None:
-    import numpy as np
-    from matplotlib import animation
-
-    fig, lines, images, n_frames = _dynamics_figure(dyn, title)
+def plot_dynamics(dyn: dict, title: str, out_png: Path) -> None:
+    fig, _, _, _ = _dynamics_figure(dyn, title)
     out_png.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_png, dpi=130)
+    plt.close(fig)
+
+
+# Dose-response: the animated variable (intervention strength) is not on either axis, so every
+# frame shows a different completion and a different point on the curves.
+
+_DOSE_ROWS = {
+    "addition_harmless": {
+        "example": "addition_harmless",
+        "title": "harmless prompts (Alpaca val): add a * r at layer {layer}",
+        "formula": "x <- x + a * r   (a = {a:.1f}, layer {layer})",
+        "xlabel": "a (1.0 = the raw difference-in-means vector)",
+    },
+    "ablation_harmful": {
+        "example": "ablation_benign_example",
+        "title": "harmful prompts (AdvBench val): remove a * (x . r_hat) r_hat, all layers",
+        "formula": "x <- x - a * (x . r_hat) r_hat   (a = {a:.1f}, every layer)",
+        "xlabel": "a (1.0 = full ablation, the paper's intervention)",
+    },
+}
+
+
+def _wrap(text: str, width: int = 74, limit: int = 420) -> str:
+    import textwrap
+
+    text = " ".join(text.split())
+    if len(text) > limit:
+        text = text[:limit].rstrip() + " ..."
+    return textwrap.fill(text, width=width)
+
+
+def _dose_curves(ax, rows: pd.DataFrame, kind: str, layer: int) -> None:
+    d = rows[rows["kind"] == kind]
+    spec = _DOSE_ROWS[kind]
+    ax.plot(d["coef"], d["refusal_rate"], marker="o", ms=4, lw=1.6, color="#d62728",
+            label="refusal rate (substring match)")
+    ax.plot(d["coef"], d["p_refusal_first_token"], marker="s", ms=3.5, lw=1.2, color="#9467bd",
+            label="P(first token is a refusal opener)")
+    ax.set_ylim(-0.03, 1.03)
+    ax.set_xlim(d["coef"].min() - 0.05, d["coef"].max() + 0.05)
+    ax.set_xlabel(spec["xlabel"])
+    ax.set_ylabel("rate / probability")
+    ax.set_title(spec["title"].format(layer=layer), fontsize=9)
+    ax.grid(alpha=0.25)
+    ax.legend(fontsize=7, loc="center right")
+
+
+def plot_dose_response(dose: dict, title: str, out_png: Path, out_gif: Path | None = None, fps: float = 1.0) -> None:
+    """Static: the two dose-response curves. GIF: the same curves with a moving marker and, beside
+    them, the example completion generated at that strength."""
+    from matplotlib import animation
+    from matplotlib.gridspec import GridSpec
+
+    rows, examples, layer = dose["rows"], dose["examples"], dose["layer"]
+    out_png.parent.mkdir(parents=True, exist_ok=True)
+
+    fig, axes = plt.subplots(1, 2, figsize=(10, 3.8), dpi=150)
+    for ax, kind in zip(axes, _DOSE_ROWS):
+        _dose_curves(ax, rows, kind, layer)
+    fig.suptitle(title, fontsize=10)
+    fig.tight_layout()
+    fig.savefig(out_png)
+    plt.close(fig)
     if out_gif is None:
-        plt.close(fig)
         return
 
-    def show_upto(k):
-        # Reveal the curves up to token index k and the heatmaps up to the same generated token.
-        for ln, xs, ys in lines.values():
-            m = xs <= k
-            ln.set_data(xs[m], ys[m])
-        for im, sub, gen_start in images.values():
-            masked = sub.copy()
-            cut = gen_start + k + 1
-            if cut < masked.shape[1]:
-                masked[:, cut:] = np.nan
-            im.set_data(masked)
-        return [v[0] for v in lines.values()] + [v[0] for v in images.values()]
+    fig = plt.figure(figsize=(12, 6.6), dpi=100)
+    gs = GridSpec(2, 2, figure=fig, width_ratios=[1, 1.45], hspace=0.6, wspace=0.15)
+    state = {}
+    for i, kind in enumerate(_DOSE_ROWS):
+        spec = _DOSE_ROWS[kind]
+        ax = fig.add_subplot(gs[i, 0])
+        _dose_curves(ax, rows, kind, layer)
+        (m1,) = ax.plot([], [], "o", ms=11, mfc="none", mec="#d62728", mew=2)
+        (m2,) = ax.plot([], [], "s", ms=10, mfc="none", mec="#9467bd", mew=2)
+        tx = fig.add_subplot(gs[i, 1])
+        tx.axis("off")
+        exs = [e for e in examples if e["kind"] == spec["example"]]
+        # Header: prompt (at most two wrapped lines), blank line, formula. Body starts below it.
+        head = tx.text(0.0, 1.0, "", va="top", ha="left", fontsize=8.5, family="monospace", transform=tx.transAxes)
+        body = tx.text(0.0, 0.62, "", va="top", ha="left", fontsize=8.5, family="monospace", transform=tx.transAxes)
+        state[kind] = {"m1": m1, "m2": m2, "head": head, "body": body, "exs": exs, "spec": spec}
 
-    ks = list(range(-8, dyn["max_new_tokens"]))
-    hold = [ks[-1]] * (2 * fps)  # pause on the final frame
-    anim = animation.FuncAnimation(fig, show_upto, frames=ks + hold, blit=False)
+    def show(kind: str, a: float):
+        st = state[kind]
+        r = rows[(rows["kind"] == kind) & (rows["coef"] == a)].iloc[0]
+        st["m1"].set_data([a], [r["refusal_rate"]])
+        st["m2"].set_data([a], [r["p_refusal_first_token"]])
+        e = next(e for e in st["exs"] if e["coef"] == a)
+        st["head"].set_text("PROMPT: " + _wrap(e["instruction"], 74, 140) + "\n\n"
+                            + st["spec"]["formula"].format(a=a, layer=layer)
+                            + f"   refusal rate on the set: {r['refusal_rate']:.2f}")
+        st["body"].set_text(("REFUSAL\n" if e["refusal"] else "COMPLIES\n") + _wrap(e["completion"]))
+        st["body"].set_color("#b71c1c" if e["refusal"] else "#1b5e20")
+
+    frames = [(k, a) for k in _DOSE_ROWS for a in rows[rows["kind"] == k]["coef"].tolist()]
+    frames += [frames[-1]] * 3  # hold the last frame
+
+    def update(frame):
+        kind, a = frame
+        if frame == frames[0]:
+            for k in _DOSE_ROWS:
+                show(k, rows[rows["kind"] == k]["coef"].min())
+        show(kind, a)
+        return []
+
+    fig.suptitle(title, fontsize=11)
+    anim = animation.FuncAnimation(fig, update, frames=frames, blit=False)
     anim.save(out_gif, writer=animation.PillowWriter(fps=fps))
     plt.close(fig)

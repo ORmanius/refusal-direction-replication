@@ -3,7 +3,7 @@
 [![smoke test](https://github.com/ORmanius/refusal-direction-replication/actions/workflows/ci.yml/badge.svg)](https://github.com/ORmanius/refusal-direction-replication/actions/workflows/ci.yml)
 [![Open the Gemma notebook in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/ORmanius/refusal-direction-replication/blob/main/notebooks/02_gemma_colab.ipynb)
 
-**Status:** Both runs complete and committed (2026-11-04): Qwen2.5-1.5B-Instruct locally, Gemma-2-2b-it on a Colab T4. The core result replicates on both models. Extensions (direction similarity, capability check, token-by-token dynamics, transfer to HarmBench and JailbreakBench): Qwen run committed; Gemma run pending.
+**Status:** Both runs complete and committed (2026-11-04): Qwen2.5-1.5B-Instruct locally, Gemma-2-2b-it on a Colab T4. The core result replicates on both models. Extensions (direction similarity, capability check, KL-based layer selection, transfer to HarmBench and JailbreakBench, dose-response, token-by-token dynamics): Qwen run committed; Gemma run pending.
 
 A small, reproducible replication of the core result of
 *Refusal in Language Models Is Mediated by a Single Direction* (Arditi et al., 2024,
@@ -20,13 +20,15 @@ A small, reproducible replication of the core result of
 This is a self-study project, not a research contribution. Everything here is scoped to
 that one result plus four follow-up checks (*Extensions*); see *Limitations* for what is left out.
 
-![Qwen2.5-1.5B-Instruct: residual-stream projection onto the refusal direction, token by token](results/qwen2.5-1.5b-instruct/extensions/projection_dynamics.gif)
+![Qwen2.5-1.5B-Instruct: refusal as a function of intervention strength](results/qwen2.5-1.5b-instruct/extensions/dose_response.gif)
 
-*Qwen2.5-1.5B-Instruct, token by token. Left: the residual stream's component along the refusal
-direction, averaged over 32 harmful prompts (top; zero once the direction is ablated) and 32
-harmless prompts (bottom; high once the direction is added). Right: the same projection at every
-layer for one harmless prompt, without and with the direction added. From
-`notebooks/03_extensions_qwen.ipynb`; details under *Extensions*.*
+*Qwen2.5-1.5B-Instruct: how much of the direction is needed. Each frame is a different
+intervention strength `a`. Top: adding `a` times the raw difference vector at layer 15 to a
+harmless prompt; the refusal rate over 32 harmless prompts (red), the model's own probability of
+opening with a refusal (purple), and the completion generated at that strength. Bottom: removing
+a fraction `a` of the component along the unit direction at every layer; the curves are over 32
+harmful prompts, and the completion shown is for a harmless-but-borderline prompt that the
+unmodified model refuses. From `notebooks/03_extensions_qwen.ipynb`; details under *Extensions*.*
 
 ## What is replicated
 
@@ -64,7 +66,7 @@ notebooks/03_extensions_qwen.ipynb extensions on the Qwen run (local GPU)
 data/splits_seed0.json   the exact prompts used (sampled with seed 0)
 data/transfer_seed0.json the exact HarmBench / JailbreakBench prompts used by the transfer check
 results/<model>/         refusal_by_layer.csv, refusal_by_layer.png, summary.json, completions
-results/<model>/extensions/  CSVs, plots and the GIF for the four extensions
+results/<model>/extensions/  CSVs, plots and GIFs for the extensions
 tests/                   CPU smoke tests on pythia-70m (run in CI)
 ```
 
@@ -126,8 +128,9 @@ Actions runs both on every push (CPU PyTorch).
 * `results/<model>/refusal_by_layer.png`, `summary.json` (chosen layer, versions, runtime).
 * `results/<model>/completions_*.jsonl`: validation completions for the baselines and for harmless prompts with the direction added.
 * `results/<model>/extensions/`: `direction_cosine.csv`, `capability_by_layer.csv`,
-  `projection_dynamics.csv`, `projection_example.csv`, `transfer.csv`, `reference_pairs.json`,
-  the plots, the GIF, and the baseline completions on the transfer sets.
+  `dose_response*.csv` and the example completions per strength, `projection_dynamics*.csv`,
+  `projection_example.csv`, `transfer*.csv`, `reference_pairs.json`, the plots, the
+  dose-response GIFs, and the baseline and addition completions on the transfer sets.
 * Not committed: the completions of the ablated model on harmful prompts, for AdvBench and for
   the transfer sets (regenerate them with the notebooks; the per-prompt refusal flags are shown
   in the notebook output), and the `directions.pt` tensors.
@@ -195,13 +198,14 @@ prompts when added, with coherent completions in both directions (see the commit
 
 ## Extensions
 
-Four checks beyond the core result, each either tightening the evidence or showing the
+Six checks beyond the core result, each either tightening the evidence or showing the
 mechanism. They run from the direction the main run saved (`refusal_direction.extensions`,
 `notebooks/03_extensions_qwen.ipynb`; the Gemma Colab notebook runs the same cells after its
-main sweep). Done for Qwen2.5-1.5B-Instruct (run of 2026-11-04, 10 minutes on the RTX 2060);
+main sweep). Done for Qwen2.5-1.5B-Instruct (run of 2026-11-05, 12 minutes on the RTX 2060);
 pending for Gemma-2-2b-it. Source for every number below:
 `results/qwen2.5-1.5b-instruct/extensions/` (`summary.json`, `direction_cosine.csv`,
-`capability_by_layer.csv`, `transfer.csv`, `transfer_layer21.csv`, `projection_dynamics*.csv`).
+`capability_by_layer.csv`, `transfer.csv`, `transfer_layer21.csv`, `dose_response*.csv`,
+`dose_response_examples*.jsonl`, `projection_dynamics*.csv`).
 
 ### 1. Are the per-layer directions one direction?
 
@@ -242,7 +246,7 @@ The paper keeps only candidate directions whose ablation KL on harmless prompts 
 nats, then takes the one that best removes refusal. The main run here did not apply that filter.
 Applying it to the sweep (`extensions.select_layer_with_kl`, same late-layer cutoff) selects
 **layer 21**: KL 0.043, reference loss unchanged, and 0 % / 100 % on the two validation tests.
-The transfer and dynamics checks below were therefore run at both layers.
+The transfer, dose-response and dynamics checks below were therefore run at both layers.
 
 ### 4. Transfer to other benchmark sets
 
@@ -264,10 +268,43 @@ by default, and ablating the direction removes that over-refusal as completely a
 refusal of harmful requests. Under the substring metric the two are indistinguishable, which is
 also the limitation of the metric.
 
-### 5. Token-by-token dynamics
+### 5. Dose-response: how much of the direction is needed?
 
-The GIF at the top of this README (static version: `extensions/projection_dynamics.png`) shows
-the projection of the residual stream onto the layer-15 direction at every token of prompt and
+The paper uses full ablation and full addition. Here the strength is varied: `x + a r` at the
+chosen layer on the 32 harmless validation prompts, and `x - a (x . r_hat) r_hat` at every layer
+on the 32 harmful validation prompts, where `a = 1` is the paper's intervention. Two readouts per
+strength: the substring refusal rate, and the probability the model assigns at the first
+generated position to its own refusal-opening token (for Qwen every baseline refusal starts with
+"I"). The GIF at the top of this README shows these curves with the completion generated at each
+strength; the ablation-side example is a benign JailbreakBench prompt that the unmodified model
+refuses, so that no harmful completion is displayed. Static curves:
+`extensions/dose_response.png` (layer 15) and `extensions/dose_response_layer21.png` (layer 21).
+
+| `a` | Addition, layer 15: refusal rate / P(opener) | Addition, layer 21 | Ablation, layer 15: refusal rate / P(opener) | Ablation, layer 21 |
+|---|---|---|---|---|
+| 0.0 | 0.00 / 0.02 | 0.00 / 0.02 | 1.00 / 0.77 | 1.00 / 0.77 |
+| 0.2 | 0.13 / 0.08 | 0.09 / 0.08 | 0.19 / 0.07 | 0.50 / 0.24 |
+| 0.4 | 0.53 / 0.28 | 0.28 / 0.22 | 0.00 / 0.03 | 0.00 / 0.02 |
+| 0.6 | 0.88 / 0.51 | 0.69 / 0.43 | 0.00 / 0.02 | 0.00 / 0.01 |
+| 0.8 | 1.00 / 0.63 | 0.91 / 0.60 | 0.00 / 0.03 | 0.00 / 0.00 |
+| 1.0 | 1.00 / 0.71 | 1.00 / 0.70 | 0.00 / 0.03 | 0.00 / 0.00 |
+| 1.6 | 1.00 / 0.86 | 1.00 / 0.78 | - | - |
+
+Three things stand out. The response is steep and asymmetric: removing 40 % of the component
+along the direction already drives refusal to 0/32 on harmful prompts, while inducing refusal on
+harmless prompts needs about 0.8 (layer 15) or 1.0 (layer 21) of the full difference vector.
+The substring metric saturates before the model's own confidence does: past `a = 0.8` every
+completion is a refusal, yet the probability of the refusal opener keeps rising from 0.63 to
+0.86. And the induced refusals come with invented reasons: at `a = 0.4` the story prompt is
+refused for "inappropriate content", at `a = 1.6` for "illegal and unethical activities,
+including hacking" (`extensions/dose_response_examples.jsonl`). The direction carries the
+decision to refuse, and the model supplies a justification afterwards.
+
+### 6. Token-by-token dynamics
+
+![Qwen2.5-1.5B-Instruct: projection onto the layer-15 direction, token by token](results/qwen2.5-1.5b-instruct/extensions/projection_dynamics.png)
+
+The projection of the residual stream onto the layer-15 direction at every token of prompt and
 completion. Over the last prompt tokens the mean projection is 15 on harmful prompts and 7 on
 harmless ones; it is 0 at every token once the direction is ablated (by construction) and 26 on
 average over the completion once the direction is added. The right-hand heatmaps show the added

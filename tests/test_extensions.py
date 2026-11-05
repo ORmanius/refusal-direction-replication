@@ -84,8 +84,25 @@ def test_dynamics_and_gif(bundle, directions, tmp_path):
     assert set(dyn["curves"]) == {"harmful_baseline", "harmful_ablated", "harmless_baseline", "harmless_added"}
     ex = dyn["example"]["harmless_added"]
     assert ex["proj"].shape == (bundle.n_layers, len(ex["tokens"]))
-    plot_dynamics(dyn, "t", tmp_path / "dyn.png", tmp_path / "dyn.gif", fps=4)
-    assert (tmp_path / "dyn.png").stat().st_size > 0 and (tmp_path / "dyn.gif").stat().st_size > 0
+    plot_dynamics(dyn, "t", tmp_path / "dyn.png")
+    assert (tmp_path / "dyn.png").stat().st_size > 0
+
+
+def test_dose_response_and_gif(bundle, directions, tmp_path):
+    from refusal_direction.extensions import dose_response_study
+    from refusal_direction.plot import plot_dose_response
+
+    r, r_hat = directions
+    dose = dose_response_study(
+        bundle, GROUP_A, GROUP_B, r, r_hat, layer=2,
+        harmless_example=(GROUP_B[0], GROUP_B[0]), benign_example=(GROUP_A[0], GROUP_A[0]),
+        add_coefs=[0.0, 1.0], abl_coefs=[0.0, 1.0], max_new_tokens=5, batch_size=4,
+    )
+    rows = dose["rows"]
+    assert list(rows["kind"]) == ["addition_harmless"] * 2 + ["ablation_harmful"] * 2
+    assert len(dose["examples"]) == 4 and all(0 <= x <= 1 for x in rows["refusal_rate"])
+    plot_dose_response(dose, "t", tmp_path / "dose.png", tmp_path / "dose.gif", fps=4)
+    assert (tmp_path / "dose.png").stat().st_size > 0 and (tmp_path / "dose.gif").stat().st_size > 0
 
 
 def test_select_layer_with_kl():

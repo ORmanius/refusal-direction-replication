@@ -47,12 +47,16 @@ def _walk(
     add_vec: torch.Tensor | None = None,
     add_layer: int | None = None,
     position: int | slice | None = None,
+    ablate_scale: float = 1.0,
+    add_scale: float = 1.0,
 ) -> list[torch.Tensor] | None:
     """One in-order pass over the residual stream; must be called inside a trace.
 
     Applies the requested interventions and, if `position` is given, returns the
     (post-intervention) residual at that token position (or slice of positions) for
-    every decoder layer.
+    every decoder layer. `ablate_scale` a removes only a fraction of the component
+    (x <- x - a (x . r_hat) r_hat; a = 1 is full ablation) and `add_scale` scales the
+    added vector (x <- x + a r); both exist for the dose-response extension.
     """
     if add_vec is not None and add_layer is None:
         raise ValueError("add_layer is required with add_vec")
@@ -69,9 +73,9 @@ def _walk(
             continue
         x = _resid(bundle, module)
         if d is not None:
-            x = x - (x * d).sum(-1, keepdim=True) * d
+            x = x - ablate_scale * (x * d).sum(-1, keepdim=True) * d
         if v is not None and layer == add_layer:
-            x = x + v
+            x = x + add_scale * v
         if needs_edit:
             _set_resid(bundle, module, x)
         if position is not None and layer >= 0:
@@ -118,6 +122,8 @@ def generate(
     ablate_dir: torch.Tensor | None = None,
     add_vec: torch.Tensor | None = None,
     add_layer: int | None = None,
+    ablate_scale: float = 1.0,
+    add_scale: float = 1.0,
 ) -> list[str]:
     """Greedy generation with an optional intervention active at every generated token."""
     tok = bundle.tokenizer
@@ -140,7 +146,8 @@ def generate(
             with tracer.invoke(enc):
                 if ablate_dir is not None or add_vec is not None:
                     for _ in tracer.all():
-                        _walk(bundle, ablate_dir=ablate_dir, add_vec=add_vec, add_layer=add_layer)
+                        _walk(bundle, ablate_dir=ablate_dir, add_vec=add_vec, add_layer=add_layer,
+                              ablate_scale=ablate_scale, add_scale=add_scale)
             with tracer.invoke():
                 out = tracer.result.save()
         ids = value(out)[:, n_in:]

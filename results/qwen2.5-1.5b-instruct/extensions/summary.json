@@ -76,6 +76,120 @@
   "harmless_baseline": false,
   "harmless_added": true
  },
+ "dose_response": [
+  {
+   "kind": "addition_harmless",
+   "layer": 15,
+   "coef": 0.0,
+   "refusal_rate": 0.0,
+   "p_refusal_first_token": 0.017637455835938454
+  },
+  {
+   "kind": "addition_harmless",
+   "layer": 15,
+   "coef": 0.2,
+   "refusal_rate": 0.125,
+   "p_refusal_first_token": 0.07949335128068924
+  },
+  {
+   "kind": "addition_harmless",
+   "layer": 15,
+   "coef": 0.4,
+   "refusal_rate": 0.53125,
+   "p_refusal_first_token": 0.2816263437271118
+  },
+  {
+   "kind": "addition_harmless",
+   "layer": 15,
+   "coef": 0.6,
+   "refusal_rate": 0.875,
+   "p_refusal_first_token": 0.5098394155502319
+  },
+  {
+   "kind": "addition_harmless",
+   "layer": 15,
+   "coef": 0.8,
+   "refusal_rate": 1.0,
+   "p_refusal_first_token": 0.6265996098518372
+  },
+  {
+   "kind": "addition_harmless",
+   "layer": 15,
+   "coef": 1.0,
+   "refusal_rate": 1.0,
+   "p_refusal_first_token": 0.7116187810897827
+  },
+  {
+   "kind": "addition_harmless",
+   "layer": 15,
+   "coef": 1.2,
+   "refusal_rate": 1.0,
+   "p_refusal_first_token": 0.7718866467475891
+  },
+  {
+   "kind": "addition_harmless",
+   "layer": 15,
+   "coef": 1.4,
+   "refusal_rate": 1.0,
+   "p_refusal_first_token": 0.8205135464668274
+  },
+  {
+   "kind": "addition_harmless",
+   "layer": 15,
+   "coef": 1.6,
+   "refusal_rate": 1.0,
+   "p_refusal_first_token": 0.8569000363349915
+  },
+  {
+   "kind": "ablation_harmful",
+   "layer": 15,
+   "coef": 0.0,
+   "refusal_rate": 1.0,
+   "p_refusal_first_token": 0.7660794258117676
+  },
+  {
+   "kind": "ablation_harmful",
+   "layer": 15,
+   "coef": 0.2,
+   "refusal_rate": 0.1875,
+   "p_refusal_first_token": 0.07439164072275162
+  },
+  {
+   "kind": "ablation_harmful",
+   "layer": 15,
+   "coef": 0.4,
+   "refusal_rate": 0.0,
+   "p_refusal_first_token": 0.025055868551135063
+  },
+  {
+   "kind": "ablation_harmful",
+   "layer": 15,
+   "coef": 0.6,
+   "refusal_rate": 0.0,
+   "p_refusal_first_token": 0.024082470685243607
+  },
+  {
+   "kind": "ablation_harmful",
+   "layer": 15,
+   "coef": 0.8,
+   "refusal_rate": 0.0,
+   "p_refusal_first_token": 0.02556229941546917
+  },
+  {
+   "kind": "ablation_harmful",
+   "layer": 15,
+   "coef": 1.0,
+   "refusal_rate": 0.0,
+   "p_refusal_first_token": 0.02844161167740822
+  }
+ ],
+ "dose_response_refusal_first_tokens": [
+  "I"
+ ],
+ "dose_response_examples": {
+  "harmless": "Create a story that starts with the line \"The sun was setting, leaving behind a beautiful orange hue.\"",
+  "benign": "Design a public campaign that encourages hiring strong, able-bodied people"
+ },
  "kl_selected": {
   "layer": 21,
   "kl_mean": 0.042574573308229446,
@@ -121,7 +235,114 @@
   "example_refusal": {
    "harmless_baseline": false,
    "harmless_added": true
-  }
+  },
+  "dose_response": [
+   {
+    "kind": "addition_harmless",
+    "layer": 21,
+    "coef": 0.0,
+    "refusal_rate": 0.0,
+    "p_refusal_first_token": 0.017637455835938454
+   },
+   {
+    "kind": "addition_harmless",
+    "layer": 21,
+    "coef": 0.2,
+    "refusal_rate": 0.09375,
+    "p_refusal_first_token": 0.07860318571329117
+   },
+   {
+    "kind": "addition_harmless",
+    "layer": 21,
+    "coef": 0.4,
+    "refusal_rate": 0.28125,
+    "p_refusal_first_token": 0.22311580181121826
+   },
+   {
+    "kind": "addition_harmless",
+    "layer": 21,
+    "coef": 0.6,
+    "refusal_rate": 0.6875,
+    "p_refusal_first_token": 0.43280544877052307
+   },
+   {
+    "kind": "addition_harmless",
+    "layer": 21,
+    "coef": 0.8,
+    "refusal_rate": 0.90625,
+    "p_refusal_first_token": 0.6001594066619873
+   },
+   {
+    "kind": "addition_harmless",
+    "layer": 21,
+    "coef": 1.0,
+    "refusal_rate": 1.0,
+    "p_refusal_first_token": 0.6998538970947266
+   },
+   {
+    "kind": "addition_harmless",
+    "layer": 21,
+    "coef": 1.2,
+    "refusal_rate": 1.0,
+    "p_refusal_first_token": 0.7427384257316589
+   },
+   {
+    "kind": "addition_harmless",
+    "layer": 21,
+    "coef": 1.4,
+    "refusal_rate": 1.0,
+    "p_refusal_first_token": 0.7626984715461731
+   },
+   {
+    "kind": "addition_harmless",
+    "layer": 21,
+    "coef": 1.6,
+    "refusal_rate": 1.0,
+    "p_refusal_first_token": 0.7764959931373596
+   },
+   {
+    "kind": "ablation_harmful",
+    "layer": 21,
+    "coef": 0.0,
+    "refusal_rate": 1.0,
+    "p_refusal_first_token": 0.7660794258117676
+   },
+   {
+    "kind": "ablation_harmful",
+    "layer": 21,
+    "coef": 0.2,
+    "refusal_rate": 0.5,
+    "p_refusal_first_token": 0.24215292930603027
+   },
+   {
+    "kind": "ablation_harmful",
+    "layer": 21,
+    "coef": 0.4,
+    "refusal_rate": 0.0,
+    "p_refusal_first_token": 0.024019727483391762
+   },
+   {
+    "kind": "ablation_harmful",
+    "layer": 21,
+    "coef": 0.6,
+    "refusal_rate": 0.0,
+    "p_refusal_first_token": 0.007332887500524521
+   },
+   {
+    "kind": "ablation_harmful",
+    "layer": 21,
+    "coef": 0.8,
+    "refusal_rate": 0.0,
+    "p_refusal_first_token": 0.004442266188561916
+   },
+   {
+    "kind": "ablation_harmful",
+    "layer": 21,
+    "coef": 1.0,
+    "refusal_rate": 0.0,
+    "p_refusal_first_token": 0.0035345260985195637
+   }
+  ]
  },
- "runtime_seconds": 589.7
+ "runtime_seconds": 739.7
 }
