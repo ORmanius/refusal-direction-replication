@@ -14,6 +14,7 @@ from refusal_direction.extensions import (
     dynamics_study,
     kl_divergence,
     last_token_logprobs,
+    logits_budget_batch,
     reference_nll,
     token_projections,
 )
@@ -57,6 +58,12 @@ def test_logprobs_kl_and_nll(bundle, directions):
     assert torch.all(kl_divergence(base, abl) >= -1e-5)
     nll = reference_nll(bundle, PAIRS, batch_size=2)
     assert nll.shape == (len(PAIRS),) and torch.all(nll > 0)
+    # Batches are capped so the logits fit a memory budget; a tiny budget forces batch 1 and the
+    # per-answer losses must not depend on how the texts were batched.
+    assert logits_budget_batch(bundle, n_tokens=1000, requested=8, budget_bytes=1) == 1
+    assert logits_budget_batch(bundle, n_tokens=10, requested=8, budget_bytes=2**40) == 8
+    nll_single = reference_nll(bundle, PAIRS, batch_size=1)
+    assert torch.allclose(nll, nll_single, atol=2e-2)  # padding changes the numerics slightly
 
 
 def test_capability_table_and_plot(bundle, directions, tmp_path):

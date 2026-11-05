@@ -105,6 +105,23 @@ def _reference_texts(bundle: ModelBundle, pairs: list[tuple[str, str]]) -> tuple
     return full, n_answer
 
 
+LOGITS_BUDGET_BYTES = 2**29  # keep one batch of full logits under 512 MB
+
+
+def logits_budget_batch(bundle: ModelBundle, n_tokens: int, requested: int,
+                        budget_bytes: int = LOGITS_BUDGET_BYTES) -> int:
+    """Largest batch size (at most `requested`) whose [batch, n_tokens, vocab] logits fit the budget.
+
+    The full-sequence logits are the largest tensor a scoring pass creates, and cross-entropy
+    copies them once more. Gemma-2 has a 256k vocabulary, so four 330-token texts in float32
+    are 1.3 GB of logits, which is what pushes a 15 GB T4 over the edge next to the 10.5 GB of
+    weights. Qwen's 152k vocabulary in float16 fits the requested batch unchanged.
+    """
+    vocab = getattr(bundle.lm.config, "vocab_size", None) or len(bundle.tokenizer)
+    itemsize = torch.tensor([], dtype=bundle.dtype).element_size()
+    return max(1, min(requested, budget_bytes // (vocab * max(n_tokens, 1) * itemsize)))
+
+
 @torch.no_grad()
 def reference_nll(
     bundle: ModelBundle,
@@ -114,19 +131,25 @@ def reference_nll(
 ) -> torch.Tensor:
     """Mean negative log-likelihood per answer token of each reference answer, [n] float32."""
     full, n_answer = _reference_texts(bundle, pairs)
+    lengths = [len(bundle.tokenizer(t, add_special_tokens=not bundle.chat)["input_ids"]) for t in full]
     out = []
-    for i in range(0, len(full), batch_size):
-        batch, n_ans = full[i : i + batch_size], n_answer[i : i + batch_size]
+    i = 0
+    while i < len(full):
+        bs = logits_budget_batch(bundle, max(lengths[i : i + batch_size]), batch_size)
+        batch, n_ans = full[i : i + bs], n_answer[i : i + bs]
+        i += bs
         enc = tokenize(bundle, batch).to(bundle.device)
         ids = enc["input_ids"]
+        # Left padding puts the answer tokens at the end of every row, so only the logits that
+        # predict the last max(n_ans) tokens are needed.
+        n_max = max(n_ans)
         with bundle.lm.trace(enc):
             _walk(bundle, ablate_dir=ablate_dir)
             logits = bundle.lm.output.logits
             nll = F.cross_entropy(
-                logits[:, :-1, :].float().transpose(1, 2), ids[:, 1:], reduction="none"
+                logits[:, -(n_max + 1) : -1, :].float().transpose(1, 2), ids[:, -n_max:], reduction="none"
             ).cpu().save()
         nll = value(nll)
-        # Left padding puts the answer tokens at the end of every row.
         out.extend(float(nll[j, -n:].mean()) for j, n in enumerate(n_ans))
     return torch.tensor(out)
 
