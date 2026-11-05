@@ -73,26 +73,28 @@ def plot_direction_similarity(cos, chosen_layer: int, title: str, out_path: Path
 
 
 def plot_capability_by_layer(df: pd.DataFrame, chosen_layer: int, title: str, out_path: Path) -> None:
+    """Two panels (one measure per axis): KL to the baseline, and reference-answer NLL."""
     base = df[df["layer"] == -1].iloc[0]
     d = df[df["layer"] >= 0]
-    fig, ax1 = plt.subplots(figsize=(7, 4), dpi=150)
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 3.9), dpi=150)
     ax1.plot(d["layer"], d["kl_mean"], marker="o", ms=3.5, lw=1.4, color="#2ca02c",
-             label="KL(baseline || ablated), harmless val, last prompt token")
-    ax1.set_ylabel("mean KL divergence (nats)", color="#2ca02c")
-    ax1.set_xlabel("layer whose direction is ablated (at every layer)")
+             label="mean KL(baseline || ablated), harmless val")
+    ax1.axhline(0.1, ls="--", lw=1, color="grey", alpha=0.7, label="paper's filter: 0.1 nats")
+    ax1.set_ylabel("KL divergence (nats)")
     ax1.set_ylim(bottom=0)
-    ax2 = ax1.twinx()
+    ax1.set_title("next-token distribution at the last prompt token", fontsize=9)
     ax2.plot(d["layer"], d["reference_nll"], marker="s", ms=3.5, lw=1.4, color="#9467bd",
-             label="NLL of Alpaca reference answers (per token)")
+             label="NLL of Alpaca reference answers")
     ax2.axhline(base["reference_nll"], ls="--", lw=1, color="#9467bd", alpha=0.6, label="NLL, no ablation")
-    ax2.set_ylabel("reference-answer NLL (nats / token)", color="#9467bd")
-    ax1.axvline(chosen_layer, color="grey", lw=1, ls=":", label=f"chosen layer {chosen_layer}")
-    ax1.set_xticks(d["layer"][:: max(1, len(d) // 14)])
-    ax1.grid(alpha=0.25)
-    h1, l1 = ax1.get_legend_handles_labels()
-    h2, l2 = ax2.get_legend_handles_labels()
-    ax1.legend(h1 + h2, l1 + l2, fontsize=7, loc="upper left")
-    ax1.set_title(title, fontsize=10)
+    ax2.set_ylabel("NLL (nats / token)")
+    ax2.set_title("loss on held-out reference answers", fontsize=9)
+    for ax in (ax1, ax2):
+        ax.axvline(chosen_layer, color="grey", lw=1, ls=":", label=f"chosen layer {chosen_layer}")
+        ax.set_xlabel("layer whose direction is ablated (at every layer)")
+        ax.set_xticks(d["layer"][:: max(1, len(d) // 14)])
+        ax.grid(alpha=0.25)
+        ax.legend(fontsize=7, loc="upper left")
+    fig.suptitle(title, fontsize=10)
     fig.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path)
@@ -278,4 +280,83 @@ def plot_dose_response(dose: dict, title: str, out_png: Path, out_gif: Path | No
     fig.suptitle(title, fontsize=11)
     anim = animation.FuncAnimation(fig, update, frames=frames, blit=False)
     anim.save(out_gif, writer=animation.PillowWriter(fps=fps))
+    plt.close(fig)
+
+
+# Geometry and neuron effects ------------------------------------------------------------
+
+
+def plot_pca_clouds(geo: dict, title: str, out_png: Path, out_gif: Path | None = None, fps: int = 12) -> None:
+    """3D scatter of the three point clouds in PC space with the refusal direction as an arrow.
+    The GIF rotates the camera: the frame variable is the viewing angle, not an axis."""
+    import numpy as np
+    from matplotlib import animation
+
+    pts, s = geo["points"], geo["summary"]
+    ex = s["explained_variance_pc1_3"]
+    arrow = np.array(s["r_hat_in_pc_space"])
+    scale = 0.8 * np.abs(pts[pts["label"] != "harmful_ablated"][["pc1", "pc2", "pc3"]].to_numpy()).max()
+    arrow = arrow / np.linalg.norm(arrow) * scale
+    c0 = np.array(s["harmless_centroid_pc"])
+
+    def build(azim, dpi=100):
+        fig = plt.figure(figsize=(8.5, 7), dpi=dpi)
+        ax = fig.add_subplot(111, projection="3d")
+        for label, color, marker, name in (("harmless", "#1f77b4", "o", "harmless prompts"),
+                                           ("harmful", "#d62728", "o", "harmful prompts"),
+                                           ("harmful_ablated", "#ff7f0e", "^", "harmful prompts, direction ablated")):
+            p = pts[pts["label"] == label]
+            ax.scatter(p["pc1"], p["pc2"], p["pc3"], s=16, c=color, marker=marker, alpha=0.75, label=name)
+        ax.quiver(*c0, *arrow, color="k", lw=2, arrow_length_ratio=0.12)
+        ax.text(*(c0 + arrow * 1.08), "refusal direction", fontsize=9)
+        ax.set_xlabel(f"PC1 ({ex[0]:.0%})")
+        ax.set_ylabel(f"PC2 ({ex[1]:.0%})")
+        ax.set_zlabel(f"PC3 ({ex[2]:.0%})")
+        ax.set_title(title, fontsize=9)
+        ax.legend(loc="upper left", fontsize=8)
+        ax.view_init(elev=22, azim=azim)
+        return fig, ax
+
+    out_png.parent.mkdir(parents=True, exist_ok=True)
+    fig, _ = build(-60)
+    fig.savefig(out_png)
+    plt.close(fig)
+    if out_gif is None:
+        return
+    fig, ax = build(0, dpi=72)  # 36 frames of 10 degrees at a lower dpi keep the GIF small
+
+    def rotate(i):
+        ax.view_init(elev=22, azim=i * 10)
+        return []
+
+    anim = animation.FuncAnimation(fig, rotate, frames=36, blit=False)
+    anim.save(out_gif, writer=animation.PillowWriter(fps=fps))
+    plt.close(fig)
+
+
+def plot_neuron_effects(top: pd.DataFrame, counts: pd.DataFrame, chosen_layer: int, title: str, out_path: Path) -> None:
+    """2D: heatmap of the ranked |d| per layer, and the number of neurons above |d| = 1 per layer."""
+    import numpy as np
+
+    ranked = top.drop(columns="layer").to_numpy()
+    n_layers, k = ranked.shape
+    count_col = [c for c in counts.columns if c.startswith("n_abs_d_over_")][0]
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4), dpi=150, gridspec_kw={"width_ratios": [1.6, 1]})
+    im = ax1.imshow(ranked.T, aspect="auto", origin="lower", cmap="inferno", interpolation="nearest")
+    ax1.axvline(chosen_layer, color="w", lw=1, ls=":")
+    ax1.set_xlabel("layer")
+    ax1.set_ylabel(f"MLP neuron, ranked by |d| within the layer (top {k})")
+    ax1.set_title("|Cohen's d| of neuron activation, harmful vs harmless (last prompt token)", fontsize=9)
+    fig.colorbar(im, ax=ax1, fraction=0.04, pad=0.02, label="|d|")
+    ax2.bar(counts["layer"], counts[count_col], color="#444")
+    ax2.axvline(chosen_layer, color="#d62728", lw=1, ls=":", label=f"chosen layer {chosen_layer}")
+    ax2.set_xlabel("layer")
+    ax2.set_ylabel(f"neurons with |d| > 1 (of {int(counts['n_neurons'].iloc[0])})")
+    ax2.set_title("how many neurons separate the two sets", fontsize=9)
+    ax2.legend(fontsize=7)
+    ax2.grid(alpha=0.25, axis="y")
+    fig.suptitle(title, fontsize=10)
+    fig.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path)
     plt.close(fig)

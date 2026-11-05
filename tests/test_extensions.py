@@ -105,6 +105,28 @@ def test_dose_response_and_gif(bundle, directions, tmp_path):
     assert (tmp_path / "dose.png").stat().st_size > 0 and (tmp_path / "dose.gif").stat().st_size > 0
 
 
+def test_geometry_and_neurons(bundle, directions, tmp_path):
+    from refusal_direction.extensions import geometry_study, neuron_effects, neuron_effects_tables
+    from refusal_direction.plot import plot_neuron_effects, plot_pca_clouds
+
+    _, r_hat = directions
+    geo = geometry_study(bundle, GROUP_A, GROUP_B, r_hat, layer=2, batch_size=4)
+    pts = geo["points"]
+    assert len(pts) == 3 * len(GROUP_A) and set(pts["label"]) == {"harmful", "harmless", "harmful_ablated"}
+    # Ablated points have no component along the direction.
+    assert pts[pts["label"] == "harmful_ablated"]["proj_r_hat"].abs().max() < 1e-2
+    assert abs(sum(geo["summary"]["explained_variance_pc1_3"])) <= 1.0
+    plot_pca_clouds(geo, "t", tmp_path / "pca.png", tmp_path / "pca.gif", fps=6)
+    assert (tmp_path / "pca.gif").stat().st_size > 0
+
+    d = neuron_effects(bundle, GROUP_A, GROUP_B, batch_size=4)
+    assert d.shape[0] == bundle.n_layers and d.shape[1] > bundle.d_model
+    top, counts = neuron_effects_tables(d, top_k=10)
+    assert top.shape == (bundle.n_layers, 11) and (top["rank_0"] >= top["rank_9"]).all()
+    plot_neuron_effects(top, counts, 2, "t", tmp_path / "neurons.png")
+    assert (tmp_path / "neurons.png").stat().st_size > 0
+
+
 def test_select_layer_with_kl():
     import pandas as pd
     from refusal_direction.extensions import select_layer_with_kl

@@ -28,7 +28,7 @@ import torch
 import torch.nn.functional as F
 
 from .data import get_transfer_sets, load_harmless_pairs
-from .intervention import _batches, _walk, generate
+from .intervention import _batches, _walk, capture_residuals, generate
 from .model import ModelBundle, format_prompts, tokenize, value
 from .pipeline import REPO_ROOT, ExperimentConfig, _write_jsonl, set_seed
 from .scoring import is_refusal, refusal_rate
@@ -373,7 +373,84 @@ def dose_response_study(
             "refusal_first_tokens": [bundle.tokenizer.decode([i]) for i in ref_ids]}
 
 
-# 6. Layer selection with the paper's KL constraint ---------------------------------------
+# 6. Geometry at the chosen layer, and which MLP neurons separate the two prompt sets ------
+
+
+def geometry_study(
+    bundle: ModelBundle,
+    harmful: list[str],
+    harmless: list[str],
+    r_hat: torch.Tensor,
+    layer: int,
+    batch_size: int = 16,
+) -> dict:
+    """PCA of the pooled last-token residuals after `layer` (harmful + harmless prompts), the
+    same prompts with the direction ablated, and where the refusal direction sits among the
+    principal components."""
+    hv = capture_residuals(bundle, harmful, -1, batch_size)[:, layer].numpy()
+    hl = capture_residuals(bundle, harmless, -1, batch_size)[:, layer].numpy()
+    ha = capture_residuals(bundle, harmful, -1, batch_size, ablate_dir=r_hat[layer])[:, layer].numpy()
+    pool = np.concatenate([hv, hl])
+    mu = pool.mean(0)
+    _, s, vt = np.linalg.svd(pool - mu, full_matrices=False)
+    pcs = vt[:3].T  # [d_model, 3]
+    explained = (s[:3] ** 2 / (s ** 2).sum()).tolist()
+    u = r_hat[layer].numpy()
+    rows = []
+    for label, pts in (("harmful", hv), ("harmless", hl), ("harmful_ablated", ha)):
+        proj = (pts - mu) @ pcs
+        along = pts @ u
+        for i in range(len(pts)):
+            rows.append({"label": label, "index": i, "pc1": float(proj[i, 0]), "pc2": float(proj[i, 1]),
+                         "pc3": float(proj[i, 2]), "proj_r_hat": float(along[i])})
+    points = pd.DataFrame(rows)
+    summary = {
+        "layer": layer,
+        "explained_variance_pc1_3": explained,
+        "abs_cos_r_hat_with_pc1_3": np.abs(u @ pcs).tolist(),
+        "mean_proj_r_hat": {k: float(points[points["label"] == k]["proj_r_hat"].mean())
+                            for k in ("harmful", "harmless", "harmful_ablated")},
+        "r_hat_in_pc_space": (u @ pcs).tolist(),
+        "harmless_centroid_pc": ((hl - mu) @ pcs).mean(0).tolist(),
+    }
+    return {"points": points, "summary": summary}
+
+
+@torch.no_grad()
+def neuron_effects(
+    bundle: ModelBundle, harmful: list[str], harmless: list[str], batch_size: int = 16
+) -> np.ndarray:
+    """Cohen's d (harmful minus harmless) of every MLP neuron's activation at the last prompt
+    token, [n_layers, n_neurons]. Neuron activation = the input to the MLP output projection."""
+
+    def acts(prompts):
+        outs = []
+        for batch in _batches(prompts, batch_size):
+            enc = tokenize(bundle, batch).to(bundle.device)
+            with bundle.lm.trace(enc):
+                cols = [bundle.mlp_out(l).input[:, -1, :] for l in range(bundle.n_layers)]
+                stacked = torch.stack(cols, dim=1).float().cpu().save()
+            outs.append(value(stacked))
+        return torch.cat(outs)
+
+    a, b = acts(harmful), acts(harmless)
+    sd = torch.sqrt(0.5 * (a.var(0) + b.var(0))) + 1e-6
+    return ((a.mean(0) - b.mean(0)) / sd).numpy()
+
+
+def neuron_effects_tables(d: np.ndarray, top_k: int = 200, threshold: float = 1.0) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """(ranked |d| of the top_k neurons per layer, count of neurons above `threshold` per layer)."""
+    absd = np.abs(d)
+    ranked = -np.sort(-absd, axis=1)[:, :top_k]
+    top = pd.DataFrame(ranked, columns=[f"rank_{i}" for i in range(ranked.shape[1])])
+    top.insert(0, "layer", range(d.shape[0]))
+    counts = pd.DataFrame({"layer": range(d.shape[0]), "n_neurons": d.shape[1],
+                           f"n_abs_d_over_{threshold:g}": (absd > threshold).sum(1),
+                           "max_abs_d": absd.max(1), "mean_abs_d": absd.mean(1)})
+    return top, counts
+
+
+# 7. Layer selection with the paper's KL constraint ---------------------------------------
 
 
 def select_layer_with_kl(
@@ -426,7 +503,8 @@ def run_extensions(
     n_reference: int = 64,
     layers: list[int] | None = None,
 ) -> dict:
-    from .plot import plot_capability_by_layer, plot_direction_similarity, plot_dose_response, plot_dynamics
+    from .plot import (plot_capability_by_layer, plot_direction_similarity, plot_dose_response, plot_dynamics,
+                       plot_neuron_effects, plot_pca_clouds)
 
     t0 = time.time()
     set_seed(cfg.seed)
@@ -490,7 +568,19 @@ def run_extensions(
 
     dose = dose_at(chosen, "")
 
-    # 6. Re-select the layer with the paper's KL filter; if it differs, repeat 3, 4 and 5 there.
+    # 6. Geometry at the chosen layer (PCA clouds) and MLP neuron effects.
+    geo = geometry_study(bundle, fmt(splits["harmful_train"]), fmt(splits["harmless_train"]), r_hat, chosen, cfg.batch_size)
+    geo["points"].to_csv(out / "pca_clouds.csv", index=False)
+    plot_pca_clouds(geo, f"{short}: residual stream after layer {chosen} (last prompt token), PCA of 128 + 128 training prompts",
+                    out / "pca_clouds.png", out / "pca_clouds.gif")
+    d_neuron = neuron_effects(bundle, fmt(splits["harmful_train"]), fmt(splits["harmless_train"]), cfg.batch_size)
+    top, counts = neuron_effects_tables(d_neuron)
+    top.to_csv(out / "neuron_effects_top.csv", index=False)
+    counts.to_csv(out / "neuron_effects_counts.csv", index=False)
+    plot_neuron_effects(top, counts, chosen, f"{short}: MLP neurons that separate harmful from harmless prompts",
+                        out / "neuron_effects.png")
+
+    # 7. Re-select the layer with the paper's KL filter; if it differs, repeat 3, 4 and 5 there.
     sweep = pd.read_csv(cfg.out_dir / "refusal_by_layer.csv")
     kl_sel = select_layer_with_kl(sweep, cap, bundle.n_layers)
     kl_layer = kl_sel["layer"]
@@ -530,10 +620,15 @@ def run_extensions(
         "dose_response": dose["rows"].to_dict(orient="records"),
         "dose_response_refusal_first_tokens": dose["refusal_first_tokens"],
         "dose_response_examples": {"harmless": harmless_ex[0], "benign": benign_ex[0]},
+        "geometry": geo["summary"],
+        "neuron_effects": {"n_neurons_per_layer": int(d_neuron.shape[1]),
+                           "n_abs_d_over_1_per_layer": counts["n_abs_d_over_1"].tolist(),
+                           "max_abs_d_per_layer": [round(float(x), 3) for x in counts["max_abs_d"]]},
         "kl_selected": kl_sel,
         "runtime_seconds": round(time.time() - t0, 1),
     }
     with open(out / "summary.json", "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=1)
     return {"summary": summary, "cosine": cos, "capability": cap, "dynamics": dyn, "transfer": tr,
-            "dose_response": dose, "kl_selected": kl_sel}
+            "dose_response": dose, "geometry": geo, "neuron_top": top, "neuron_counts": counts,
+            "kl_selected": kl_sel}

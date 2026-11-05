@@ -67,6 +67,7 @@ data/splits_seed0.json   the exact prompts used (sampled with seed 0)
 data/transfer_seed0.json the exact HarmBench / JailbreakBench prompts used by the transfer check
 results/<model>/         refusal_by_layer.csv, refusal_by_layer.png, summary.json, completions
 results/<model>/extensions/  CSVs, plots and GIFs for the extensions
+docs/explorer.html       interactive viewer for the result files (Plotly, single file)
 tests/                   CPU smoke tests on pythia-70m (run in CI)
 ```
 
@@ -109,6 +110,24 @@ pipeline and offers a zip of `results/gemma-2-2b-it/` to download and commit. Th
 first cell lists the exact steps. The committed Gemma results came from exactly this notebook on a
 free Colab T4 (23 minutes). Setting `REFUSAL_SMOKE=1` runs the same cells on CPU with `pythia-70m`.
 
+### Results explorer (interactive, no install)
+
+`docs/explorer.html` is a single HTML page that reads the result files in `results/<model>/`
+and draws them interactively (Plotly): the per-layer sweep, the capability cost with a
+layer-selection trade-off view, the direction-similarity heatmap, the dose-response curves with
+the completion generated at each strength on click, the transfer bars, the token-by-token
+projections with per-token hover, the PCA clouds as a rotatable 3D scatter, the neuron-effect
+tables, and a searchable completions browser. Every chart has a table view and nothing is
+computed in the page beyond reading the files. By default it fetches the files from this
+repository on GitHub; it can also read a local checkout or files you drop onto it (for example a
+zip of a Gemma run, unpacked). Open it from a local checkout with any static server:
+
+```bash
+python -m http.server 8765
+```
+
+then visit `http://localhost:8765/docs/explorer.html` and pick "local" as the source.
+
 ### Tests
 
 ```bash
@@ -129,8 +148,9 @@ Actions runs both on every push (CPU PyTorch).
 * `results/<model>/completions_*.jsonl`: validation completions for the baselines and for harmless prompts with the direction added.
 * `results/<model>/extensions/`: `direction_cosine.csv`, `capability_by_layer.csv`,
   `dose_response*.csv` and the example completions per strength, `projection_dynamics*.csv`,
-  `projection_example.csv`, `transfer*.csv`, `reference_pairs.json`, the plots, the
-  dose-response GIFs, and the baseline and addition completions on the transfer sets.
+  `projection_example.csv`, `transfer*.csv`, `pca_clouds.csv`, `neuron_effects_*.csv`,
+  `reference_pairs.json`, the plots, the dose-response and PCA GIFs, and the baseline and
+  addition completions on the transfer sets.
 * Not committed: the completions of the ablated model on harmful prompts, for AdvBench and for
   the transfer sets (regenerate them with the notebooks; the per-prompt refusal flags are shown
   in the notebook output), and the `directions.pt` tensors.
@@ -198,14 +218,15 @@ prompts when added, with coherent completions in both directions (see the commit
 
 ## Extensions
 
-Six checks beyond the core result, each either tightening the evidence or showing the
+Seven checks beyond the core result, each either tightening the evidence or showing the
 mechanism. They run from the direction the main run saved (`refusal_direction.extensions`,
 `notebooks/03_extensions_qwen.ipynb`; the Gemma Colab notebook runs the same cells after its
 main sweep). Done for Qwen2.5-1.5B-Instruct (run of 2026-11-05, 12 minutes on the RTX 2060);
 pending for Gemma-2-2b-it. Source for every number below:
 `results/qwen2.5-1.5b-instruct/extensions/` (`summary.json`, `direction_cosine.csv`,
 `capability_by_layer.csv`, `transfer.csv`, `transfer_layer21.csv`, `dose_response*.csv`,
-`dose_response_examples*.jsonl`, `projection_dynamics*.csv`).
+`dose_response_examples*.jsonl`, `projection_dynamics*.csv`, `pca_clouds.csv`,
+`neuron_effects_*.csv`). All of them can be browsed interactively in `docs/explorer.html`.
 
 ### 1. Are the per-layer directions one direction?
 
@@ -300,7 +321,33 @@ refused for "inappropriate content", at `a = 1.6` for "illegal and unethical act
 including hacking" (`extensions/dose_response_examples.jsonl`). The direction carries the
 decision to refuse, and the model supplies a justification afterwards.
 
-### 6. Token-by-token dynamics
+### 6. Geometry at the chosen layer, and which neurons carry the difference
+
+![Qwen2.5-1.5B-Instruct: PCA of the residual stream after layer 15](results/qwen2.5-1.5b-instruct/extensions/pca_clouds.gif)
+
+Residual stream after layer 15 at the last prompt token for the 128 harmful and 128 harmless
+training prompts, projected onto the top three principal components of the pooled activations,
+with the refusal direction drawn from the harmless centroid (rotating camera; static version
+`extensions/pca_clouds.png`, points in `extensions/pca_clouds.csv`, rotatable in the explorer).
+The refusal direction is the first principal component almost exactly (|cos| = 0.996), and that
+component carries 35 % of all variance at this layer; the next two carry 10 % and 6 %. The two
+clouds sit apart along it: mean projection 22.5 for harmful prompts, 7.1 for harmless ones.
+The orange triangles are the harmful prompts with the direction ablated: they land beyond the
+harmless cloud, not inside it, because ablation sets the component to zero while harmless
+prompts naturally keep a positive value. That is the geometric reason ablation also removes
+over-refusal on the benign transfer set.
+
+![Qwen2.5-1.5B-Instruct: MLP neurons separating harmful from harmless prompts](results/qwen2.5-1.5b-instruct/extensions/neuron_effects.png)
+
+Which MLP neurons carry the difference: for every layer, Cohen's d of each neuron's activation
+(the input to the MLP output projection) between the two prompt sets at the last prompt token.
+The separation is spread across thousands of neurons per layer rather than a few: between
+1,100 (layer 0) and 4,300 (layer 19) of the 8,960 neurons differ by more than one standard
+deviation. The strongest single neurons jump from |d| of about 3 in layers 0-12 to about 6
+from layer 16 on, matching where the direction starts to work. Neuron index has no spatial
+meaning in a transformer, so the only "location" of refusal that these data support is depth.
+
+### 7. Token-by-token dynamics
 
 ![Qwen2.5-1.5B-Instruct: projection onto the layer-15 direction, token by token](results/qwen2.5-1.5b-instruct/extensions/projection_dynamics.png)
 

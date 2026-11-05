@@ -23,6 +23,18 @@ _PATHS: dict[str, tuple[str, str]] = {
     "gpt2": ("transformer.h", "transformer.wte"),
 }
 
+# The MLP output projection inside a decoder layer; its input is the vector of neuron
+# activations (used by the neuron-effects extension).
+_MLP_OUT: dict[str, str] = {
+    "qwen2": "mlp.down_proj",
+    "gemma2": "mlp.down_proj",
+    "gemma": "mlp.down_proj",
+    "llama": "mlp.down_proj",
+    "mistral": "mlp.down_proj",
+    "gpt_neox": "mlp.dense_4h_to_h",
+    "gpt2": "mlp.c_proj",
+}
+
 
 def value(x: Any) -> Any:
     """Return the concrete value of a saved NNsight proxy (works across nnsight versions)."""
@@ -47,10 +59,15 @@ class ModelBundle:
     embed_path: str
     output_is_tuple: bool
     chat: bool
+    model_type: str = ""
 
     @property
     def tokenizer(self):
         return self.lm.tokenizer
+
+    def mlp_out(self, layer: int):
+        """The MLP output projection module of decoder layer `layer` (its input = neuron activations)."""
+        return _resolve(self.layers[layer], _MLP_OUT[self.model_type])
 
     @property
     def layers(self):
@@ -117,6 +134,7 @@ def load_model(
         embed_path=embed_path,
         output_is_tuple=output_is_tuple,
         chat=chat,
+        model_type=model_type,
     )
 
 
