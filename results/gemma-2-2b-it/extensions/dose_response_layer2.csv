@@ -1,0 +1,16 @@
+kind,layer,coef,refusal_rate,p_refusal_first_token
+addition_harmless,2,0.0,0.0,0.003392240032553673
+addition_harmless,2,0.2,0.0,0.0033434005454182625
+addition_harmless,2,0.4,0.0,0.0032956295181065798
+addition_harmless,2,0.6,0.0,0.0032491215970367193
+addition_harmless,2,0.8,0.0,0.00320446933619678
+addition_harmless,2,1.0,0.0,0.0031617709901183844
+addition_harmless,2,1.2,0.0,0.003121547633782029
+addition_harmless,2,1.4,0.0,0.0030838348902761936
+addition_harmless,2,1.6,0.0,0.003048996441066265
+ablation_harmful,2,0.0,1.0,0.997988760471344
+ablation_harmful,2,0.2,1.0,0.997673749923706
+ablation_harmful,2,0.4,1.0,0.9972473978996277
+ablation_harmful,2,0.6,1.0,0.996811032295227
+ablation_harmful,2,0.8,1.0,0.9964220523834229
+ablation_harmful,2,1.0,1.0,0.9961106777191162

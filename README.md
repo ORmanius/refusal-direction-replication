@@ -4,7 +4,7 @@
 [![Open the Gemma notebook in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/ORmanius/refusal-direction-replication/blob/main/notebooks/02_gemma_colab.ipynb)
 [![Results explorer](https://img.shields.io/badge/results-explorer-2d6cdf)](https://ormanius.github.io/refusal-direction-replication/)
 
-**Status:** Both runs complete and committed (2026-11-04): Qwen2.5-1.5B-Instruct locally, Gemma-2-2b-it on a Colab T4. The core result replicates on both models. Extensions (direction similarity, capability check, KL-based layer selection, transfer to HarmBench and JailbreakBench, dose-response, token-by-token dynamics): Qwen run committed; Gemma run pending.
+**Status:** Both runs complete and committed (2026-11-04): Qwen2.5-1.5B-Instruct locally, Gemma-2-2b-it on a Colab T4. The core result replicates on both models. Extensions (direction similarity, capability check, KL-based layer selection, transfer to HarmBench and JailbreakBench, dose-response, geometry and neurons, token-by-token dynamics): committed for both models (Gemma run of 2026-11-05). One divergence worth reading: on Gemma the paper's KL filter, applied at one read-out position, selects a layer whose direction does nothing (*Extensions*, section 3).
 
 A small, reproducible replication of the core result of
 *Refusal in Language Models Is Mediated by a Single Direction* (Arditi et al., 2024,
@@ -226,9 +226,11 @@ prompts when added, with coherent completions in both directions (see the commit
 Seven checks beyond the core result, each either tightening the evidence or showing the
 mechanism. They run from the direction the main run saved (`refusal_direction.extensions`,
 `notebooks/03_extensions_qwen.ipynb`; the Gemma Colab notebook runs the same cells after its
-main sweep). Done for Qwen2.5-1.5B-Instruct (run of 2026-11-05, 12 minutes on the RTX 2060);
-pending for Gemma-2-2b-it. Source for every number below:
-`results/qwen2.5-1.5b-instruct/extensions/` (`summary.json`, `direction_cosine.csv`,
+main sweep). Done for Qwen2.5-1.5B-Instruct (run of 2026-11-05, 12 minutes on the RTX 2060) and
+for Gemma-2-2b-it (run of 2026-11-05, 42 minutes on a Colab T4 after the main sweep, same
+notebook; its core numbers reproduced the committed run exactly). Each subsection reports Qwen
+first and Gemma in a closing paragraph. Source for every number below:
+`results/<model>/extensions/` (`summary.json`, `direction_cosine.csv`,
 `capability_by_layer.csv`, `transfer.csv`, `transfer_layer21.csv`, `dose_response*.csv`,
 `dose_response_examples*.jsonl`, `projection_dynamics*.csv`, `pca_clouds.csv`,
 `neuron_effects_*.csv`). All of them can be browsed interactively in `docs/explorer.html`.
@@ -243,6 +245,11 @@ Only loosely. The layer-15 direction has cosine 0.75 with its neighbours at laye
 drifts steadily with depth rather than being one fixed vector. The core result does not depend
 on the directions agreeing (each layer's direction is tested on its own), but "a single
 direction" is best read as "a single direction per read-out layer".
+
+Gemma-2-2b-it (`results/gemma-2-2b-it/extensions/direction_cosine.csv`): the same drift, faster.
+The layer-11 direction has cosine 0.80 and 0.86 with layers 10 and 12, 0.52 at layer 15, 0.34 at
+layer 16 and 0.12-0.16 from layer 21 on. Among layers 6-20, the span whose ablation removes most
+or all refusal in the sweep, the smallest pairwise cosine is 0.00.
 
 ### 2. Does ablation damage the model?
 
@@ -266,6 +273,27 @@ and 1.5). Layers 20-23 remove refusal just as completely in the sweep at KL belo
 the reference loss unchanged. So the sweep's refusal rates alone do not distinguish a clean
 direction from one that also degrades the model; the KL check does.
 
+![Cost of ablating each layer's direction, Gemma-2-2b-it](results/gemma-2-2b-it/extensions/capability_by_layer.png)
+
+Gemma-2-2b-it pays far more (`results/gemma-2-2b-it/extensions/capability_by_layer.csv`):
+
+| Direction ablated | Mean KL to baseline (nats) | NLL of reference answers (nats / token) |
+|---|---|---|
+| none | 0 | 2.908 |
+| layer 11 (chosen by the main run) | 3.618 | 3.224 |
+| layer 14 | 0.112 | 2.917 |
+| layer 19 | 0.119 | 2.829 |
+| layer 2 (chosen with the paper's KL filter, below) | 0.023 | 2.906 |
+
+Ablating the layer-11 direction moves Gemma's harmless next-token distribution by 3.6 nats on
+average, six times the cost of Qwen's chosen layer, and raises the reference-answer loss by 11 %;
+every direction from layers 4 to 12 costs between 1.4 and 5.8 nats. The completions stay coherent
+(the ablated benign example in `dose_response_examples.jsonl` is a well-formed speech at every
+strength), so the cost shows up as a shifted distribution rather than broken text, but it is not
+the near-free intervention that Qwen's layer 21 is. The directions from layers 14 and 19 remove
+and induce refusal just as completely in the sweep at KL 0.11-0.12, with the reference loss
+within 3 % of baseline.
+
 ### 3. Selecting the layer the paper's way
 
 The paper keeps only candidate directions whose ablation KL on harmless prompts is below 0.1
@@ -273,6 +301,17 @@ nats, then takes the one that best removes refusal. The main run here did not ap
 Applying it to the sweep (`extensions.select_layer_with_kl`, same late-layer cutoff) selects
 **layer 21**: KL 0.043, reference loss unchanged, and 0 % / 100 % on the two validation tests.
 The transfer, dose-response and dynamics checks below were therefore run at both layers.
+
+On Gemma-2-2b-it the same rule fails. Below the late-layer cutoff (layers 0-20) only layer 2 has
+KL under 0.1 nats, so the filter selects **layer 2**, whose direction neither removes refusal
+(32/32 still refuse when it is ablated) nor induces it (0/32 when added). The layer-23 direction
+also passes the filter but sits in the excluded tail and induces refusal on only 5/32. Layers 14
+and 19 miss the threshold by 0.01-0.02 nats while passing both validation tests at 100 %. So on
+this model, with the direction read at one position only, the paper's two criteria cannot be
+met at once: either the threshold has to give a little or the direction has to be searched over
+more positions, as the paper does. The Gemma transfer, dose-response and dynamics checks below
+were run at layer 11 and at the filter's layer 2, and the layer-2 rows are the control they look
+like: nothing changes.
 
 ### 4. Transfer to other benchmark sets
 
@@ -293,6 +332,18 @@ AdvBench/Alpaca split cannot show: Qwen refuses half of these harmless-but-borde
 by default, and ablating the direction removes that over-refusal as completely as it removes
 refusal of harmful requests. Under the substring metric the two are indistinguishable, which is
 also the limitation of the metric.
+
+Gemma-2-2b-it (`results/gemma-2-2b-it/extensions/transfer.csv`, `transfer_layer2.csv`):
+
+| Set | No intervention | Direction ablated, layer 11 | ablated, layer 2 | Direction added, layer 11 | added, layer 2 |
+|---|---|---|---|---|---|
+| HarmBench standard (n=64) | 64/64 refused (100 %) | 0/64 | 63/64 | - | - |
+| JailbreakBench harmful, non-AdvBench (n=64) | 62/64 (97 %) | 0/64 | 60/64 | - | - |
+| JailbreakBench benign (n=64) | 18/64 (28 %) | 0/64 | 18/64 | 64/64 | 19/64 |
+
+The layer-11 direction transfers as completely as Qwen's. Gemma over-refuses the benign set less
+than Qwen does (28 % against 52 %), and ablation removes that too. The layer-2 direction, the one
+the KL filter picks, changes at most two completions in any row.
 
 ### 5. Dose-response: how much of the direction is needed?
 
@@ -326,6 +377,30 @@ refused for "inappropriate content", at `a = 1.6` for "illegal and unethical act
 including hacking" (`extensions/dose_response_examples.jsonl`). The direction carries the
 decision to refuse, and the model supplies a justification afterwards.
 
+Gemma-2-2b-it (`results/gemma-2-2b-it/extensions/dose_response.csv`; static curves
+`extensions/dose_response.png`, animation `extensions/dose_response.gif`, layer-2 control
+`dose_response_layer2.*`; Gemma's baseline refusals also all open with "I"):
+
+| `a` | Addition, layer 11: refusal rate / P(opener) | Ablation, layer 11: refusal rate / P(opener) |
+|---|---|---|
+| 0.0 | 0.00 / 0.00 | 1.00 / 1.00 |
+| 0.2 | 0.00 / 0.01 | 0.00 / 0.00 |
+| 0.4 | 0.13 / 0.10 | 0.00 / 0.00 |
+| 0.6 | 0.69 / 0.57 | 0.00 / 0.00 |
+| 0.8 | 0.97 / 0.92 | 0.00 / 0.00 |
+| 1.0 | 1.00 / 0.99 | 0.00 / 0.00 |
+| 1.6 | 1.00 / 1.00 | - |
+
+Gemma is even more abrupt. Removing 20 % of the component is enough: refusal falls from 32/32 to
+0/32 and the probability of the opener from 0.998 to 0.001. Addition follows the same curve as
+Qwen's (13 % at 0.4, 69 % at 0.6, 97 % at 0.8), but Gemma's confidence tracks the substring
+metric closely instead of lagging it: P(opener) is 0.99 at `a = 1.0`. The invented reasons are
+there too. The sunset story is refused at `a = 0.6` because it "glorifies or encourages harmful
+activities, such as violence", at `a = 0.8` for "illegal activities, such as arson", at
+`a = 1.4` for "hacking, theft, or violence", and at `a = 1.6` the model announces "I am not
+capable of doing this" about a story that begins with a sunset. At layer 2 both curves are flat
+(0/32 added, 32/32 ablated, at every strength).
+
 ### 6. Geometry at the chosen layer, and which neurons carry the difference
 
 ![Qwen2.5-1.5B-Instruct: PCA of the residual stream after layer 15](results/qwen2.5-1.5b-instruct/extensions/pca_clouds.gif)
@@ -352,6 +427,18 @@ deviation. The strongest single neurons jump from |d| of about 3 in layers 0-12 
 from layer 16 on, matching where the direction starts to work. Neuron index has no spatial
 meaning in a transformer, so the only "location" of refusal that these data support is depth.
 
+![Gemma-2-2b-it: PCA of the residual stream after layer 11](results/gemma-2-2b-it/extensions/pca_clouds.png)
+
+Gemma-2-2b-it (`results/gemma-2-2b-it/extensions/summary.json`, `pca_clouds.csv`,
+`neuron_effects_counts.csv`; rotating version `pca_clouds.gif`): the same geometry at a larger
+scale. The refusal direction is again the first principal component (|cos| = 0.989, 29 % of the
+variance; the next two carry 8 % and 4 %), the mean projections are 129 for harmful and 42 for
+harmless prompts, about six times Qwen's values, and the ablated harmful prompts again land past
+the harmless cloud. The neuron picture matches too: of 9,216 MLP neurons per layer, between 600
+(layer 1) and 3,400 (layer 19) differ by more than one standard deviation, and the strongest
+single neurons go from |d| of about 2 in the first four layers to about 7 at layers 22-23
+(`neuron_effects.png`).
+
 ### 7. Token-by-token dynamics
 
 ![Qwen2.5-1.5B-Instruct: projection onto the layer-15 direction, token by token](results/qwen2.5-1.5b-instruct/extensions/projection_dynamics.png)
@@ -370,6 +457,14 @@ tokens and settles near 11 over the rest of the completion; on harmless prompts 
 throughout. The "decision" is visible as a spike at the end of the prompt, before the first
 token is generated, which is what the paper's choice of read-out position assumes.
 
+Gemma-2-2b-it (`results/gemma-2-2b-it/extensions/projection_dynamics.csv`,
+`projection_dynamics_layer2.csv`; figures `projection_dynamics.png`,
+`projection_dynamics_layer2.png`): along the layer-11 direction the projection averages 111 over
+the last eight prompt tokens of harmful prompts and 55 for harmless ones, peaks at 132 at the
+last prompt token on harmful prompts, and settles near 64 over the completion; adding the
+direction holds harmless prompts at about 140 throughout. Along the layer-2 direction every
+condition stays within 5 of zero: there is nothing there to read.
+
 ## Limitations
 
 * **Refusal metric.** Substring matching over a fixed phrase list is the paper's primary
@@ -383,8 +478,9 @@ token is generated, which is what the paper's choice of read-out position assume
 * **Direction selection.** One token position (the last prompt token) and a simple validation
   score are used instead of the paper's search over positions with KL-divergence constraints.
   The per-layer sweep is reported in full so the choice is visible. The extensions add the KL
-  filter after the fact (it changes the chosen Qwen layer from 15 to 21) but still search one
-  position only.
+  filter after the fact (it changes the chosen Qwen layer from 15 to 21; on Gemma it selects a
+  layer whose direction does nothing, because no working single-position direction passes the
+  0.1-nat threshold) but still search one position only.
 * **Small validation sets.** 32 prompts per class, as in the paper: one prompt is about 3
   percentage points.
 * **Greedy decoding, 64 new tokens.** Enough for the substring metric; the paper generates
@@ -394,9 +490,10 @@ token is generated, which is what the paper's choice of read-out position assume
 * **Limited capability check after ablation.** The paper verifies that the ablated model stays
   generally competent with benchmark scores (MMLU, ARC, GSM8K, TruthfulQA) as well as a KL check.
   The extensions here measure the KL divergence on harmless prompts and the loss on reference
-  answers, which catch a direction that visibly disturbs the model (layer 15 does, mildly), but
-  no benchmark accuracy was measured. The core-result section still reports the main run's
-  layer 15; see *Extensions* for the KL-selected layer 21.
+  answers, which catch a direction that visibly disturbs the model (Qwen's layer 15 does, mildly;
+  Gemma's layer 11 moves the harmless next-token distribution by 3.6 nats), but no benchmark
+  accuracy was measured. The core-result sections still report the main runs' layers; see
+  *Extensions* for the KL-selected ones.
 * **Two models, one seed.** No error bars across seeds or prompt subsets.
 
 ## Citation
