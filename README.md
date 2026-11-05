@@ -2,6 +2,7 @@
 
 [![smoke test](https://github.com/ORmanius/refusal-direction-replication/actions/workflows/ci.yml/badge.svg)](https://github.com/ORmanius/refusal-direction-replication/actions/workflows/ci.yml)
 [![Open the Gemma notebook in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/ORmanius/refusal-direction-replication/blob/main/notebooks/02_gemma_colab.ipynb)
+[![Results explorer](https://img.shields.io/badge/results-explorer-2d6cdf)](https://ormanius.github.io/refusal-direction-replication/)
 
 **Status:** Both runs complete and committed (2026-11-04): Qwen2.5-1.5B-Instruct locally, Gemma-2-2b-it on a Colab T4. The core result replicates on both models. Extensions (direction similarity, capability check, KL-based layer selection, transfer to HarmBench and JailbreakBench, dose-response, token-by-token dynamics): Qwen run committed; Gemma run pending.
 
@@ -112,6 +113,9 @@ free Colab T4 (23 minutes). Setting `REFUSAL_SMOKE=1` runs the same cells on CPU
 
 ### Results explorer (interactive, no install)
 
+**Live:** <https://ormanius.github.io/refusal-direction-replication/> (GitHub Pages, served from
+`docs/`, reading the committed result files).
+
 `docs/explorer.html` is a single HTML page that reads the result files in `results/<model>/`
 and draws them interactively (Plotly): the per-layer sweep, the capability cost with a
 layer-selection trade-off view, the direction-similarity heatmap, the dose-response curves with
@@ -120,7 +124,8 @@ projections with per-token hover, the PCA clouds as a rotatable 3D scatter, the 
 tables, and a searchable completions browser. Every chart has a table view and nothing is
 computed in the page beyond reading the files. By default it fetches the files from this
 repository on GitHub; it can also read a local checkout or files you drop onto it (for example a
-zip of a Gemma run, unpacked). Open it from a local checkout with any static server:
+zip of a Gemma run, unpacked): drop them onto the live page, or serve a local checkout with any
+static server:
 
 ```bash
 python -m http.server 8765
